@@ -5,6 +5,8 @@ Accepts PDF/DOCX/TXT file uploads, extracts requests, normalizes fields, and fla
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
+import re
+import uuid
 
 from backend.database import get_db
 from backend.models import (
@@ -37,11 +39,47 @@ async def ingest_document(
         doc_content = extract_document(content_bytes, file.filename)
         ingest_res = process_document_content(doc_content)
 
-        # Persist extracted requests into database
+        # Persist extracted requests into database safely
+        seen_ids = set()
         for req in ingest_res.candidate_requests:
-            # Check if request_id already exists, else insert
+            # Clean and ensure unique request_id within this upload batch
+            clean_id = re.sub(r"\s+", "", str(req.request_id)).strip() if req.request_id else ""
+            if not clean_id:
+                clean_id = f"REQ-{uuid.uuid4().hex[:6].upper()}"
+            
+            orig_id = clean_id
+            counter = 1
+            while clean_id in seen_ids:
+                clean_id = f"{orig_id}_{counter}"
+                counter += 1
+            seen_ids.add(clean_id)
+            req.request_id = clean_id
+
+            # Check if request_id already exists in database
             existing = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == req.request_id).first()
-            if not existing:
+            if existing:
+                existing.department = req.department.value
+                existing.corridor = req.corridor
+                existing.km_start = req.km_start
+                existing.km_end = req.km_end
+                existing.asset = req.asset
+                existing.work_type = req.work_type
+                existing.priority = req.priority
+                existing.priority_reason = req.priority_reason
+                existing.block_type = req.block_type.value
+                existing.duration_minutes = req.duration_minutes
+                existing.earliest_start = req.earliest_start
+                existing.latest_end = req.latest_end
+                existing.due_date = req.due_date
+                existing.required_resources = req.required_resources
+                existing.isolation_requirement = req.isolation_requirement
+                existing.block_shared_allowed = req.block_shared_allowed
+                existing.dependencies = req.dependencies
+                existing.status = req.status.value
+                existing.source_document = req.source_document
+                existing.missing_fields = req.missing_fields
+                existing.validation_notes = req.validation_notes
+            else:
                 db_req = DBMaintenanceRequest(
                     request_id=req.request_id,
                     department=req.department.value,

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Robust Normalization Layer for Railway Maintenance Requests and Train Movements.
 Converts arbitrary tables, key-value blocks, and prose into canonical MaintenanceRequest objects.
 Flags incomplete or ambiguous records as Needs-Review (Rule 8).
@@ -272,10 +272,13 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
 
         def get_col(key: str) -> str:
             if key in col_map and col_map[key] < len(row):
-                return row[col_map[key]].strip()
+                val = row[col_map[key]]
+                if val:
+                    return " ".join(str(val).split()).strip()
             return ""
 
-        req_id = get_col("id") or f"REQ-{uuid.uuid4().hex[:6].upper()}"
+        raw_id = get_col("id")
+        req_id = re.sub(r"\s+", "", raw_id) if raw_id else f"REQ-{uuid.uuid4().hex[:6].upper()}"
         corridor = get_col("corridor")
         dept_str = get_col("dept")
         work_str = get_col("work_type") or "Track Maintenance"

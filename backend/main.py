@@ -61,12 +61,36 @@ async def run_emergency_escalation_audit():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize database tables and migrations on startup
     init_db()
-    # Start background escalation checker
-    escalation_task = asyncio.create_task(run_emergency_escalation_audit())
+
+    # Auto-create default users if none exist
+    from backend.database import SessionLocal
+    from backend.models import DBUser
+    from backend.auth import hash_password
+    db = SessionLocal()
+    try:
+        if db.query(DBUser).count() == 0:
+            users = [
+                ("planner1", "planner123", "Planner"),
+                ("ops1", "ops123", "Operations"),
+                ("approver1", "approver123", "Approver"),
+            ]
+            for username, password, role in users:
+                db.add(DBUser(
+                    username=username,
+                    password_hash=hash_password(password),
+                    role=role,
+                    department="Engineering"
+                ))
+            db.commit()
+            print("✅ Default users created successfully.")
+        else:
+            print("ℹ️ Users already exist, skipping creation.")
+    finally:
+        db.close()
+
     yield
-    escalation_task.cancel()
+    # ... other cleanup
 
 
 app = FastAPI(

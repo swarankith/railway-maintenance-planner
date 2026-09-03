@@ -19,6 +19,8 @@ An intelligent full-stack decision-support application for Indian Railways and m
    - Solves multi-objective constraint satisfaction: maximizes high-priority jobs scheduled, minimizes track closure downtime, eliminates train interference, and maximizes joint department bundling.
    - Generates **Plan A (Maximum Bundling)** and **Plan B (Rapid Turnaround)**.
    - Produces domain-specific, plain-language reasoning for every maintenance block.
+
+The work-type exceptions are prototype engineering defaults and must be validated against the applicable Indian Railways safety and COA rules before operational deployment.
 5. **Interactive Corridor Gantt Chart & Approval Hub**:
    - Visual timeline displaying corridors on Y-axis and IST hours on X-axis.
    - Color-coded department badges and bundled joint blocks.

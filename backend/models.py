@@ -1,6 +1,11 @@
 """
 Canonical Data Models, Pydantic Schemas, and SQLAlchemy Database Entities.
 All timestamps are timezone-aware (IST, Asia/Kolkata, UTC+5:30).
+Phase 2 Additions:
+- User Authentication (Roles: Planner, Operations, Approver)
+- Application ID (APP-YYYYMMDD-XXXXXX)
+- Priority Schema (1=Emergency, 2=High Urgent, 3=Normal)
+- ProcessingCycle & EscalationEvent models
 """
 import uuid
 import json
@@ -12,9 +17,15 @@ from pydantic import BaseModel, Field, field_validator, ConfigDict
 from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, Date, Text, ForeignKey, JSON
 from sqlalchemy.orm import declarative_base, relationship
 
-from backend.config import APP_TIMEZONE
+from backend.config import APP_TIMEZONE, PRIORITY_MIN, PRIORITY_MAX
 
 Base = declarative_base()
+
+
+class UserRoleEnum(str, Enum):
+    PLANNER = "Planner"
+    OPERATIONS = "Operations"
+    APPROVER = "Approver"
 
 
 class DepartmentEnum(str, Enum):
@@ -38,6 +49,9 @@ class RequestStatusEnum(str, Enum):
     OPTIMIZED = "Optimized"
     APPROVED = "Approved"
     REJECTED = "Rejected"
+    DEFERRED = "Deferred"
+    MANUAL_REVIEW = "Manual Review"
+    ISOLATED_EMERGENCY = "Isolated-Emergency"
 
 
 class ConflictTypeEnum(str, Enum):
@@ -45,6 +59,7 @@ class ConflictTypeEnum(str, Enum):
     RESOURCE_OVERLAP = "ResourceOverlap"
     TRAIN_MOVEMENT_CONFLICT = "TrainMovementConflict"
     DEPARTMENT_INCOMPATIBILITY = "DepartmentIncompatibility"
+    SAME_ASSET_HARD_CLASH = "SameAssetHardClash"
 
 
 class PlanStatusEnum(str, Enum):
@@ -54,18 +69,56 @@ class PlanStatusEnum(str, Enum):
 
 
 # ==========================================
-# Pydantic Canonical Schemas
+# Authentication Pydantic Schemas
 # ==========================================
+
+class UserBase(BaseModel):
+    username: str
+    role: UserRoleEnum = UserRoleEnum.PLANNER
+    department: str = "Engineering"
+
+
+class UserCreate(UserBase):
+    password: str
+
+
+class UserOut(UserBase):
+    id: int
+    created_at: Optional[datetime] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+# ==========================================
+# Maintenance Request Pydantic Schemas
+# ==========================================
+
+def generate_application_id() -> str:
+    now_str = datetime.now(APP_TIMEZONE).strftime("%Y%m%d")
+    rand_hex = uuid.uuid4().hex[:6].upper()
+    return f"APP-{now_str}-{rand_hex}"
+
 
 class MaintenanceRequestBase(BaseModel):
     request_id: str = Field(default_factory=lambda: f"REQ-{uuid.uuid4().hex[:6].upper()}")
-    department: DepartmentEnum = DepartmentEnum.ENGINEERING
+    application_id: Optional[str] = Field(default_factory=generate_application_id)
+    department: str = "Engineering"
     corridor: str
     km_start: float
     km_end: float
     asset: str
     work_type: str
-    priority: int = Field(default=3, ge=1, le=5, description="1=Highest urgency, 5=Lowest urgency")
+    priority: int = Field(default=3, description="1=Emergency, 2=High Urgent, 3=Normal")
     priority_reason: Optional[str] = None
     block_type: BlockTypeEnum = BlockTypeEnum.NORMAL
     duration_minutes: int = Field(gt=0, description="Required block duration in minutes")
@@ -80,6 +133,7 @@ class MaintenanceRequestBase(BaseModel):
     source_document: str = "manual_entry"
     missing_fields: List[str] = Field(default_factory=list)
     validation_notes: Optional[str] = None
+    retry_count: int = Field(default=0, ge=0)
 
     @field_validator("earliest_start", "latest_end", mode="before")
     def ensure_timezone_aware(cls, v):
@@ -96,17 +150,18 @@ class MaintenanceRequestBase(BaseModel):
             dt = dt.astimezone(APP_TIMEZONE)
         return dt
 
-    @field_validator("km_end")
-    def validate_km_range(cls, v, values):
-        if "km_start" in values.data and v < values.data["km_start"]:
-            # Swap if inverted or adjust
-            pass
+    @field_validator("priority")
+    def validate_priority_range(cls, v):
+        # Priority should be 1, 2, or 3. If above 3, normalize or flag
+        if v not in (1, 2, 3):
+            return 3  # Default to Normal if out of range, flagged in validation notes
         return v
 
 
 class MaintenanceRequestCreate(BaseModel):
     request_id: Optional[str] = None
-    department: DepartmentEnum
+    application_id: Optional[str] = None
+    department: str
     corridor: str
     km_start: float
     km_end: float
@@ -128,7 +183,7 @@ class MaintenanceRequestCreate(BaseModel):
 
 
 class MaintenanceRequestUpdate(BaseModel):
-    department: Optional[DepartmentEnum] = None
+    department: Optional[str] = None
     corridor: Optional[str] = None
     km_start: Optional[float] = None
     km_end: Optional[float] = None
@@ -147,6 +202,7 @@ class MaintenanceRequestUpdate(BaseModel):
     dependencies: Optional[List[str]] = None
     status: Optional[RequestStatusEnum] = None
     validation_notes: Optional[str] = None
+    retry_count: Optional[int] = Field(default=None, ge=0)
 
 
 class MaintenanceRequest(MaintenanceRequestBase):
@@ -214,6 +270,20 @@ class MaintenanceBlock(BaseModel):
     requests: List[MaintenanceRequest] = Field(default_factory=list)
 
 
+class RequestDecision(BaseModel):
+    """Deterministic per-request output from batch processing engine."""
+    request_id: str
+    application_id: Optional[str] = None
+    final_status: str
+    disconnection_required: bool
+    priority: int
+    bundle_id: Optional[str] = None
+    bundle_members: List[str] = Field(default_factory=list)
+    retry_count: int = 0
+    reason: str
+    train_window_checked: bool
+
+
 class SchedulePlan(BaseModel):
     schedule_id: str = Field(default_factory=lambda: f"SCHED-{uuid.uuid4().hex[:8].upper()}")
     plan_name: str
@@ -226,6 +296,7 @@ class SchedulePlan(BaseModel):
     total_jobs_requested: int = 0
     bundling_efficiency_percentage: float = 0.0
     summary_explanation: str
+    decisions: List[RequestDecision] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(APP_TIMEZONE))
     status: PlanStatusEnum = PlanStatusEnum.GENERATED
     approved_by: Optional[str] = None
@@ -235,7 +306,7 @@ class SchedulePlan(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    role: str = Field(default="Chief Controller", description="Planner / Operations Manager / Chief Controller")
+    role: str = Field(default="Chief Controller", description="Planner / Operations / Approver")
     user_name: str = Field(default="Senior Traffic Controller")
     notes: Optional[str] = "Approved after reviewing corridor availability and bundling explanations."
 
@@ -247,6 +318,7 @@ class RejectionRequest(BaseModel):
 
 
 class IngestResponse(BaseModel):
+    application_id: str
     filename: str
     total_extracted: int
     confirmed_count: int
@@ -256,15 +328,36 @@ class IngestResponse(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
+class EscalationEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: f"ESC-{uuid.uuid4().hex[:6].upper()}")
+    request_id: str
+    corridor: str
+    reason: str
+    escalated_at: datetime = Field(default_factory=lambda: datetime.now(APP_TIMEZONE))
+    status: str = "Pending"  # Pending, Acknowledged, Resolved
+
+
 # ==========================================
 # SQLAlchemy Persistence Tables
 # ==========================================
+
+class DBUser(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(64), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(32), nullable=False, default="Planner")
+    department = Column(String(64), nullable=False, default="Engineering")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
+
 
 class DBMaintenanceRequest(Base):
     __tablename__ = "maintenance_requests"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     request_id = Column(String(64), unique=True, index=True, nullable=False)
+    application_id = Column(String(64), index=True, nullable=True)
     department = Column(String(32), nullable=False)
     corridor = Column(String(64), index=True, nullable=False)
     km_start = Column(Float, nullable=False)
@@ -286,6 +379,7 @@ class DBMaintenanceRequest(Base):
     source_document = Column(String(255), nullable=False, default="manual_entry")
     missing_fields = Column(JSON, nullable=False, default=list)
     validation_notes = Column(Text, nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE), onupdate=lambda: datetime.now(APP_TIMEZONE))
 
@@ -325,8 +419,34 @@ class DBApprovalAudit(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     schedule_id = Column(String(64), index=True, nullable=False)
+    application_id = Column(String(64), index=True, nullable=True)
     action = Column(String(32), nullable=False)  # APPROVED or REJECTED
     role = Column(String(128), nullable=False)
     user_name = Column(String(128), nullable=False)
     notes = Column(Text, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
+
+
+class DBProcessingCycle(Base):
+    __tablename__ = "processing_cycles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cycle_id = Column(String(64), unique=True, index=True, nullable=False)
+    total_requests = Column(Integer, nullable=False, default=0)
+    approved_count = Column(Integer, nullable=False, default=0)
+    deferred_count = Column(Integer, nullable=False, default=0)
+    manual_review_count = Column(Integer, nullable=False, default=0)
+    isolated_emergency_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
+
+
+class DBEscalationEvent(Base):
+    __tablename__ = "escalation_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(64), unique=True, index=True, nullable=False)
+    request_id = Column(String(64), index=True, nullable=False)
+    corridor = Column(String(64), nullable=False)
+    reason = Column(Text, nullable=False)
+    escalated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
+    status = Column(String(32), default="Pending")

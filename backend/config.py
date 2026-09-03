@@ -1,5 +1,9 @@
 """
-Application configuration, constants, priority conventions, and compatibility matrix.
+Application configuration, constants, priority conventions, and security settings.
+Phase 2 Updates:
+- Priority Convention: 1 = Emergency, 2 = High Urgent, 3 = Normal (Values > 3 flagged)
+- Emergency Escalation Timeout: 15 Minutes
+- JWT Authentication Settings
 """
 import os
 from zoneinfo import ZoneInfo
@@ -15,27 +19,31 @@ if raw_db_url.startswith("postgres://"):
     raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
 DATABASE_URL = raw_db_url
 
-# Priority Conventions (Rule 7)
-# 1 = Highest Urgency (Emergency / Safety Critical)
-# 5 = Lowest Urgency (Routine / Deferrable)
-PRIORITY_HIGHEST = 1
-PRIORITY_HIGH = 2
-PRIORITY_MEDIUM = 3
-PRIORITY_LOW = 4
-PRIORITY_LOWEST = 5
+# JWT Authentication Settings
+JWT_SECRET = os.getenv("JWT_SECRET", "railway-block-planner-jwt-secret-key-2026-v2")
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+
+# Priority Conventions (Phase 2)
+# 1 = Emergency (Immediate / Safety Critical)
+# 2 = High Urgent (Speed restriction removal / Urgent operational)
+# 3 = Normal (Standard / Routine maintenance)
+PRIORITY_EMERGENCY = 1
+PRIORITY_HIGH_URGENT = 2
+PRIORITY_NORMAL = 3
 PRIORITY_MIN = 1
-PRIORITY_MAX = 5
+PRIORITY_MAX = 3
 
 PRIORITY_LABELS = {
-    1: "P1 - Critical Safety / Emergency",
-    2: "P2 - High Operational Urgency",
-    3: "P3 - Standard Periodic Maintenance",
-    4: "P4 - Preventative Inspection",
-    5: "P5 - Routine / Deferrable"
+    1: "P1 - Emergency",
+    2: "P2 - High Urgent",
+    3: "P3 - Normal"
 }
 
-# Compatibility Matrix (Configurable, Section 5)
-# Tracks department compatibility for joint bundling within a shared maintenance block
+# Emergency Escalation Timeout (in minutes)
+EMERGENCY_ESCALATION_MINUTES = 15
+
+# Compatibility Matrix (Tracks department compatibility for joint bundling)
 DEFAULT_COMPATIBILITY_PAIRS: Set[Tuple[str, str]] = {
     ("Engineering", "Electrical"),
     ("Electrical", "Engineering"),

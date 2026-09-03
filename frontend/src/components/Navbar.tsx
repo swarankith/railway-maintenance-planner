@@ -1,17 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import {
   Train,
-  UploadCloud,
-  FileText,
+  FileSpreadsheet,
   AlertTriangle,
   Calendar,
-  CheckCircle,
+  CheckCircle2,
+  FileText,
   Clock,
-  Activity,
-  Layers,
-  Sparkles
+  LogOut,
+  UserCheck,
+  History,
 } from 'lucide-react';
-import { ActiveTab } from '../types';
+import { ActiveTab, User } from '../types';
 
 interface NavbarProps {
   activeTab: ActiveTab;
@@ -20,6 +20,8 @@ interface NavbarProps {
   conflictsCount: number;
   needsReviewCount: number;
   hasSchedule: boolean;
+  currentUser: User | null;
+  onLogout: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -29,132 +31,154 @@ export const Navbar: React.FC<NavbarProps> = ({
   conflictsCount,
   needsReviewCount,
   hasSchedule,
+  currentUser,
+  onLogout,
 }) => {
-  const [istTime, setIstTime] = useState<string>('');
-
-  useEffect(() => {
-    const updateTime = () => {
-      const now = new Date();
-      // Format to IST
-      const options: Intl.DateTimeFormatOptions = {
-        timeZone: 'Asia/Kolkata',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: true,
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric'
-      };
-      setIstTime(new Intl.DateTimeFormat('en-IN', options).format(now));
-    };
-    updateTime();
-    const interval = setInterval(updateTime, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const navItems = [
-    {
-      id: 'ingest' as ActiveTab,
-      label: 'Document Ingestion',
-      icon: UploadCloud,
-      badge: needsReviewCount > 0 ? `${needsReviewCount} review` : undefined,
-      badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
-    },
-    {
-      id: 'requests' as ActiveTab,
-      label: 'Requests Pool',
-      icon: FileText,
-      badge: requestsCount > 0 ? `${requestsCount}` : undefined,
-      badgeColor: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
-    },
-    {
-      id: 'conflicts' as ActiveTab,
-      label: 'Conflict Matrix',
-      icon: AlertTriangle,
-      badge: conflictsCount > 0 ? `${conflictsCount}` : undefined,
-      badgeColor: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
-    },
-    {
-      id: 'gantt' as ActiveTab,
-      label: 'Corridor Timeline & Gantt',
-      icon: Calendar,
-      badge: hasSchedule ? 'Active' : undefined,
-      badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
-    },
-    {
-      id: 'approval' as ActiveTab,
-      label: 'Planner Approval Hub',
-      icon: CheckCircle,
-      badge: undefined,
-      badgeColor: '',
-    },
-  ];
-
   return (
-    <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 shadow-xl">
+    <header className="bg-gradient-to-r from-saffron-500 via-saffron-600 to-amber-600 text-white shadow-xl sticky top-0 z-40">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
-          {/* Logo & Brand */}
+        <div className="flex items-center justify-between h-16 sm:h-20">
+          {/* Brand Logo & Name */}
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20 border border-cyan-400/30">
-              <Train className="w-6 h-6 text-white" />
+            <div className="p-2.5 bg-navy-800 text-white rounded-2xl shadow-md border border-white/20">
+              <Train className="w-6 h-6 sm:w-7 sm:h-7 text-white" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-extrabold text-lg tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-100 to-cyan-200">
+                <span className="font-black text-lg sm:text-2xl tracking-tight text-white drop-shadow">
                   RailBlock AI
                 </span>
-                <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">
-                  Prototype
+                <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-navy-900/40 text-white border border-white/30 backdrop-blur-sm">
+                  Phase 2.0
                 </span>
               </div>
-              <p className="text-xs text-slate-400 font-medium">
-                Railway Maintenance Block Optimizer & Decision Support
+              <p className="text-[11px] sm:text-xs font-semibold text-white/90 tracking-wide hidden sm:block">
+                Indian Railways Decision-Support & Deterministic Bundling
               </p>
             </div>
           </div>
 
-          {/* Time & System Status */}
-          <div className="hidden lg:flex items-center gap-4 text-xs font-mono">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950/60 border border-slate-800 text-slate-300">
-              <Clock className="w-3.5 h-3.5 text-cyan-400" />
-              <span>{istTime || 'Loading IST...'} (IST)</span>
-            </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-sans font-medium">
-              <Activity className="w-3.5 h-3.5 animate-pulse" />
-              <span>OR-Tools Engine Ready</span>
-            </div>
+          {/* Right Status & User Badges */}
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* User Profile Badge */}
+            {currentUser && (
+              <div className="flex items-center gap-2 bg-navy-950/80 px-3 py-1.5 rounded-xl border border-white/20 shadow-sm backdrop-blur-md">
+                <UserCheck className="w-4 h-4 text-saffron-400" />
+                <div className="text-left">
+                  <div className="text-xs font-bold text-white leading-tight">
+                    {currentUser.username}
+                  </div>
+                  <div className="text-[9px] font-semibold text-saffron-300 uppercase tracking-wider">
+                    {currentUser.role}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Logout Button */}
+            {currentUser && (
+              <button
+                onClick={onLogout}
+                title="Sign Out"
+                className="p-2 bg-white/20 hover:bg-white/30 text-white rounded-xl transition-all border border-white/20"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
         {/* Navigation Tabs */}
-        <nav className="flex space-x-1 sm:space-x-2 py-2 overflow-x-auto border-t border-slate-800/60">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id)}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all duration-150 whitespace-nowrap ${
-                  isActive
-                    ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 shadow-sm shadow-cyan-500/10'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-cyan-400' : 'text-slate-400'}`} />
-                <span>{item.label}</span>
-                {item.badge && (
-                  <span
-                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${item.badgeColor}`}
-                  >
-                    {item.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
+        <nav className="flex space-x-1 sm:space-x-2 overflow-x-auto pb-2 scrollbar-none">
+          <button
+            onClick={() => setActiveTab('ingest')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              activeTab === 'ingest'
+                ? 'bg-navy-900 text-white shadow-lg border border-white/30'
+                : 'text-white/80 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            <span>Document Ingestion</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('requests')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              activeTab === 'requests'
+                ? 'bg-navy-900 text-white shadow-lg border border-white/30'
+                : 'text-white/80 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>Requests Pool</span>
+            {requestsCount > 0 && (
+              <span className="ml-1 text-[10px] px-2 py-0.5 rounded-full font-extrabold bg-white text-navy-900 shadow-sm">
+                {requestsCount}
+              </span>
+            )}
+            {needsReviewCount > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-extrabold bg-rose-600 text-white animate-pulse">
+                {needsReviewCount} Review
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('conflicts')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              activeTab === 'conflicts'
+                ? 'bg-navy-900 text-white shadow-lg border border-white/30'
+                : 'text-white/80 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <AlertTriangle className="w-4 h-4" />
+            <span>Conflict Matrix</span>
+            {conflictsCount > 0 && (
+              <span className="ml-1 text-[10px] px-2 py-0.5 rounded-full font-extrabold bg-rose-600 text-white">
+                {conflictsCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('gantt')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              activeTab === 'gantt'
+                ? 'bg-navy-900 text-white shadow-lg border border-white/30'
+                : 'text-white/80 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <Calendar className="w-4 h-4" />
+            <span>Corridor Timeline & Gantt</span>
+            {hasSchedule && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('approval')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              activeTab === 'approval'
+                ? 'bg-navy-900 text-white shadow-lg border border-white/30'
+                : 'text-white/80 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <CheckCircle2 className="w-4 h-4" />
+            <span>Planner Approval Hub</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('history')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              activeTab === 'history'
+                ? 'bg-navy-900 text-white shadow-lg border border-white/30'
+                : 'text-white/80 hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <History className="w-4 h-4" />
+            <span>Audit History Portal</span>
+          </button>
         </nav>
       </div>
     </header>

@@ -5,6 +5,7 @@ Requests CRUD API:
 - PUT /api/v1/requests/{request_id}
 - POST /api/v1/requests/{request_id}/confirm
 - DELETE /api/v1/requests/{request_id}
+Protected by JWT Authentication.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -17,9 +18,11 @@ from backend.models import (
     MaintenanceRequestCreate,
     MaintenanceRequestUpdate,
     DBMaintenanceRequest,
+    DBUser,
     RequestStatusEnum,
-    DepartmentEnum,
+    generate_application_id,
 )
+from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/requests", tags=["Requests"])
 
@@ -28,7 +31,8 @@ def db_to_pydantic(db_req: DBMaintenanceRequest) -> MaintenanceRequest:
     return MaintenanceRequest(
         id=db_req.id,
         request_id=db_req.request_id,
-        department=DepartmentEnum(db_req.department),
+        application_id=db_req.application_id or "APP-LEGACY",
+        department=db_req.department,
         corridor=db_req.corridor,
         km_start=db_req.km_start,
         km_end=db_req.km_end,
@@ -49,6 +53,7 @@ def db_to_pydantic(db_req: DBMaintenanceRequest) -> MaintenanceRequest:
         source_document=db_req.source_document,
         missing_fields=db_req.missing_fields or [],
         validation_notes=db_req.validation_notes,
+        retry_count=db_req.retry_count or 0,
         created_at=db_req.created_at,
         updated_at=db_req.updated_at
     )
@@ -60,6 +65,8 @@ def list_requests(
     department: Optional[str] = None,
     status: Optional[str] = None,
     priority: Optional[int] = None,
+    application_id: Optional[str] = None,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """List and filter maintenance requests."""
@@ -72,6 +79,8 @@ def list_requests(
         query = query.filter(DBMaintenanceRequest.status == status)
     if priority:
         query = query.filter(DBMaintenanceRequest.priority == priority)
+    if application_id:
+        query = query.filter(DBMaintenanceRequest.application_id.ilike(f"%{application_id}%"))
 
     records = query.order_by(DBMaintenanceRequest.priority.asc(), DBMaintenanceRequest.earliest_start.asc()).all()
     return [db_to_pydantic(r) for r in records]
@@ -80,25 +89,28 @@ def list_requests(
 @router.post("", response_model=MaintenanceRequest)
 def create_request(
     payload: MaintenanceRequestCreate,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Manually create a new maintenance request or add a custom job."""
     req_id = payload.request_id or f"REQ-{datetime.now().strftime('%H%M%S')}"
-    
-    # Check duplicate
+
     existing = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == req_id).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"Request ID '{req_id}' already exists.")
 
+    app_id = payload.application_id or generate_application_id()
+
     db_req = DBMaintenanceRequest(
         request_id=req_id,
-        department=payload.department.value,
+        application_id=app_id,
+        department=str(payload.department),
         corridor=payload.corridor.strip().upper(),
         km_start=payload.km_start,
         km_end=payload.km_end,
         asset=payload.asset,
         work_type=payload.work_type,
-        priority=payload.priority,
+        priority=payload.priority if payload.priority in (1, 2, 3) else 3,
         priority_reason=payload.priority_reason or "Manually submitted request",
         block_type=payload.block_type.value,
         duration_minutes=payload.duration_minutes,
@@ -124,6 +136,7 @@ def create_request(
 def update_request(
     request_id: str,
     payload: MaintenanceRequestUpdate,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Edit/complete an existing request (especially flagged Needs-Review records)."""
@@ -135,13 +148,15 @@ def update_request(
     for field, val in update_data.items():
         if val is not None:
             if field == "department":
-                setattr(db_req, field, val.value if hasattr(val, 'value') else str(val))
+                setattr(db_req, field, str(val))
             elif field == "block_type":
                 setattr(db_req, field, val.value if hasattr(val, 'value') else str(val))
             elif field == "status":
                 setattr(db_req, field, val.value if hasattr(val, 'value') else str(val))
             elif field == "corridor":
                 setattr(db_req, field, str(val).strip().upper())
+            elif field == "priority":
+                setattr(db_req, field, int(val) if int(val) in (1, 2, 3) else 3)
             else:
                 setattr(db_req, field, val)
 
@@ -173,6 +188,7 @@ def update_request(
 @router.post("/{request_id}/confirm", response_model=MaintenanceRequest)
 def confirm_request(
     request_id: str,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Manually confirms a request to Confirmed state."""
@@ -182,7 +198,7 @@ def confirm_request(
 
     db_req.status = RequestStatusEnum.CONFIRMED.value
     db_req.missing_fields = []
-    db_req.validation_notes = "Manually confirmed by planner"
+    db_req.validation_notes = f"Manually confirmed by {current_user.username}"
     db.commit()
     db.refresh(db_req)
     return db_to_pydantic(db_req)
@@ -191,6 +207,7 @@ def confirm_request(
 @router.delete("/{request_id}")
 def delete_request(
     request_id: str,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Delete a single request."""
@@ -203,7 +220,10 @@ def delete_request(
 
 
 @router.delete("")
-def clear_all_requests(db: Session = Depends(get_db)):
+def clear_all_requests(
+    current_user: DBUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Deletes all maintenance requests and train movements for clean state testing."""
     db.query(DBMaintenanceRequest).delete()
     db.commit()

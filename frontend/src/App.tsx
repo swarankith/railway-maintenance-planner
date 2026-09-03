@@ -7,12 +7,15 @@ import { GanttChart } from './components/GanttChart';
 import { BlockDetailModal } from './components/BlockDetailModal';
 import { ApprovalHub } from './components/ApprovalHub';
 import { EditRequestModal } from './components/EditRequestModal';
+import { ApprovalHistoryPortal } from './components/ApprovalHistoryPortal';
+import { LoginView } from './components/LoginView';
 import {
   MaintenanceRequest,
   ConflictDetail,
   SchedulePlan,
   MaintenanceBlock,
   ActiveTab,
+  User,
 } from './types';
 import {
   fetchRequests,
@@ -20,9 +23,16 @@ import {
   optimizeSchedule,
   createRequest,
   updateRequest,
+  getAuthToken,
+  getStoredUser,
+  clearAuthToken,
+  fetchMe,
 } from './services/api';
 
 export const App: React.FC = () => {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [activeTab, setActiveTab] = useState<ActiveTab>('ingest');
   const [requests, setRequests] = useState<MaintenanceRequest[]>([]);
   const [conflicts, setConflicts] = useState<ConflictDetail[]>([]);
@@ -45,21 +55,58 @@ export const App: React.FC = () => {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Check auth session on load
+  useEffect(() => {
+    const token = getAuthToken();
+    const stored = getStoredUser();
+    if (token && stored) {
+      setCurrentUser(stored);
+      fetchMe()
+        .then((user) => setCurrentUser(user))
+        .catch(() => {
+          clearAuthToken();
+          setCurrentUser(null);
+        })
+        .finally(() => setAuthChecked(true));
+    } else {
+      setAuthChecked(true);
+    }
+  }, []);
+
   const loadAllData = async () => {
+    if (!getAuthToken()) return;
     setLoading(true);
     try {
       const reqList = await fetchRequests();
       setRequests(reqList);
     } catch (err: any) {
-      showToast(err.message || 'Failed to load requests', 'error');
+      if (err.message.includes('Session expired') || err.message.includes('Authentication required')) {
+        clearAuthToken();
+        setCurrentUser(null);
+      } else {
+        showToast(err.message || 'Failed to load requests', 'error');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadAllData();
-  }, []);
+    if (currentUser) {
+      loadAllData();
+    }
+  }, [currentUser]);
+
+  const handleLoginSuccess = (user: User) => {
+    setCurrentUser(user);
+    showToast(`Welcome back, ${user.username} (${user.role})!`, 'success');
+  };
+
+  const handleLogout = () => {
+    clearAuthToken();
+    setCurrentUser(null);
+    showToast('Logged out successfully.', 'info');
+  };
 
   const handleTriggerConflictCheck = async () => {
     setIsCheckingConflicts(true);
@@ -67,7 +114,7 @@ export const App: React.FC = () => {
       const result = await checkConflicts();
       setConflicts(result);
       setActiveTab('conflicts');
-      showToast(`Detected ${result.length} potential conflict(s).`, 'info');
+      showToast(`Detected ${result.length} interaction(s) in matrix.`, 'info');
     } catch (err: any) {
       showToast(err.message || 'Conflict check failed', 'error');
     } finally {
@@ -82,7 +129,7 @@ export const App: React.FC = () => {
       setSchedulePlan(plan);
       await loadAllData();
       setActiveTab('gantt');
-      showToast('Optimization complete! Bundled blocks generated with CP-SAT.', 'success');
+      showToast('Optimization complete! Bundled blocks generated with Deterministic Engine.', 'success');
     } catch (err: any) {
       showToast(err.message || 'Optimization failed', 'error');
     } finally {
@@ -118,10 +165,23 @@ export const App: React.FC = () => {
     setIsBlockModalOpen(true);
   };
 
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center text-slate-600 font-semibold text-sm">
+        Initializing RailBlock AI Portal...
+      </div>
+    );
+  }
+
+  // If not logged in, show Login Screen
+  if (!currentUser) {
+    return <LoginView onLoginSuccess={handleLoginSuccess} />;
+  }
+
   const needsReviewCount = requests.filter((r) => r.status === 'Needs-Review').length;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-cyan-500 selection:text-white">
+    <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col selection:bg-saffron-500 selection:text-white">
       {/* Header Navbar */}
       <Navbar
         activeTab={activeTab}
@@ -130,18 +190,20 @@ export const App: React.FC = () => {
         conflictsCount={conflicts.length}
         needsReviewCount={needsReviewCount}
         hasSchedule={schedulePlan !== null}
+        currentUser={currentUser}
+        onLogout={handleLogout}
       />
 
       {/* Toast Notification */}
       {toast && (
         <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-5 duration-200">
           <div
-            className={`px-4 py-3 rounded-2xl shadow-2xl border text-xs font-semibold backdrop-blur-md ${
+            className={`px-4 py-3 rounded-2xl shadow-2xl border text-xs font-bold backdrop-blur-md ${
               toast.type === 'success'
-                ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500/40 shadow-emerald-500/20'
+                ? 'bg-emerald-900/90 text-emerald-200 border-emerald-500/50 shadow-emerald-900/20'
                 : toast.type === 'error'
-                ? 'bg-rose-950/90 text-rose-300 border-rose-500/40 shadow-rose-500/20'
-                : 'bg-slate-900/90 text-cyan-300 border-cyan-500/40 shadow-cyan-500/20'
+                ? 'bg-rose-900/90 text-rose-200 border-rose-500/50 shadow-rose-900/20'
+                : 'bg-navy-950/90 text-saffron-300 border-saffron-500/40 shadow-navy-950/30'
             }`}
           >
             {toast.message}
@@ -197,6 +259,8 @@ export const App: React.FC = () => {
             setActiveTab={setActiveTab}
           />
         )}
+
+        {activeTab === 'history' && <ApprovalHistoryPortal />}
       </main>
 
       {/* Modals */}

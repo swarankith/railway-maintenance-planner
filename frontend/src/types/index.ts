@@ -1,23 +1,48 @@
+export type UserRole = 'Planner' | 'Operations' | 'Approver';
+
+export interface User {
+  id: number;
+  username: string;
+  role: UserRole;
+  department: string;
+  created_at?: string;
+}
+
 export type Department = 'Engineering' | 'S&T' | 'Electrical' | 'Operations' | 'Other';
 
 export type BlockType = 'Normal' | 'Emergency' | 'Planned';
 
-export type RequestStatus = 'Ingested' | 'Needs-Review' | 'Confirmed' | 'Optimized' | 'Approved' | 'Rejected';
+export type RequestStatus =
+  | 'Ingested'
+  | 'Needs-Review'
+  | 'Confirmed'
+  | 'Optimized'
+  | 'Approved'
+  | 'Rejected'
+  | 'Deferred'
+  | 'Manual Review'
+  | 'Isolated-Emergency';
 
-export type ConflictType = 'SpatialTimeKM' | 'ResourceOverlap' | 'TrainMovementConflict' | 'DepartmentIncompatibility';
+export type ConflictType =
+  | 'SpatialTimeKM'
+  | 'ResourceOverlap'
+  | 'TrainMovementConflict'
+  | 'DepartmentIncompatibility'
+  | 'SameAssetHardClash';
 
 export type PlanStatus = 'Generated' | 'Approved' | 'Rejected';
 
 export interface MaintenanceRequest {
   id?: number;
   request_id: string;
+  application_id?: string;
   department: Department;
   corridor: string;
   km_start: number;
   km_end: number;
   asset: string;
   work_type: string;
-  priority: number; // 1 (Highest) to 5 (Lowest)
+  priority: number; // 1: Emergency, 2: High Urgent, 3: Normal
   priority_reason?: string;
   block_type: BlockType;
   duration_minutes: number;
@@ -32,6 +57,7 @@ export interface MaintenanceRequest {
   source_document: string;
   missing_fields: string[];
   validation_notes?: string;
+  retry_count?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -81,6 +107,19 @@ export interface MaintenanceBlock {
   requests: MaintenanceRequest[];
 }
 
+export interface RequestDecision {
+  request_id: string;
+  application_id?: string;
+  final_status: string;
+  disconnection_required: boolean;
+  priority: number;
+  bundle_id?: string;
+  bundle_members: string[];
+  retry_count: number;
+  reason: string;
+  train_window_checked: boolean;
+}
+
 export interface SchedulePlan {
   schedule_id: string;
   plan_name: string;
@@ -93,6 +132,7 @@ export interface SchedulePlan {
   total_jobs_requested: number;
   bundling_efficiency_percentage: number;
   summary_explanation: string;
+  decisions?: RequestDecision[];
   created_at: string;
   status: PlanStatus;
   approved_by?: string;
@@ -103,6 +143,7 @@ export interface SchedulePlan {
 }
 
 export interface IngestResponse {
+  application_id: string;
   filename: string;
   total_extracted: number;
   confirmed_count: number;
@@ -115,6 +156,7 @@ export interface IngestResponse {
 export interface ApprovalAudit {
   id: number;
   schedule_id: string;
+  application_id?: string;
   action: 'APPROVED' | 'REJECTED';
   role: string;
   user_name: string;
@@ -122,4 +164,19 @@ export interface ApprovalAudit {
   timestamp: string;
 }
 
-export type ActiveTab = 'ingest' | 'requests' | 'conflicts' | 'gantt' | 'approval';
+export interface ApprovalHistoryItem {
+  id: number;
+  schedule_id: string;
+  application_id: string;
+  action: 'APPROVED' | 'REJECTED';
+  role: string;
+  user_name: string;
+  notes?: string;
+  timestamp: string;
+  request_ids: string[];
+  corridors: string[];
+  total_blocks: number;
+  total_jobs: number;
+}
+
+export type ActiveTab = 'ingest' | 'requests' | 'conflicts' | 'gantt' | 'approval' | 'history';

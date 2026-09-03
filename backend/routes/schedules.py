@@ -1,4 +1,4 @@
-﻿"""
+"""
 Schedule Optimization & Approval API Endpoints:
 - POST /api/v1/schedules/optimize
 - GET /api/v1/schedules/{id}
@@ -6,11 +6,13 @@ Schedule Optimization & Approval API Endpoints:
 - POST /api/v1/schedules/{id}/reject
 - GET /api/v1/schedules
 - GET /api/v1/schedules/{id}/audit
+Protected by JWT Authentication.
 """
 import json
+import uuid
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -24,12 +26,15 @@ from backend.models import (
     DBApprovalAudit,
     DBMaintenanceRequest,
     DBTrainMovement,
+    DBProcessingCycle,
+    DBUser,
     TrainMovement,
     RequestStatusEnum,
     PlanStatusEnum,
 )
+from backend.auth import get_current_user
 from backend.routes.requests import db_to_pydantic
-from backend.engine.optimizer import solve_maintenance_schedule
+from backend.engine.batch_engine import solve_maintenance_schedule
 
 router = APIRouter(prefix="/api/v1/schedules", tags=["Schedules"])
 
@@ -41,10 +46,11 @@ class OptimizationResult(SchedulePlan):
 @router.post("/optimize", response_model=OptimizationResult)
 def optimize_schedules(
     request_ids: Optional[List[str]] = None,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Triggers optimization engine across confirmed maintenance requests.
+    Triggers Deterministic Batch Decision Engine across confirmed maintenance requests.
     Produces Recommended Plan (Maximum Bundling) and Alternative Plan (Rapid Turnaround),
     with explainability text for every block.
     """
@@ -55,7 +61,8 @@ def optimize_schedules(
         query = query.filter(DBMaintenanceRequest.status.in_([
             RequestStatusEnum.CONFIRMED.value,
             RequestStatusEnum.INGESTED.value,
-            RequestStatusEnum.OPTIMIZED.value
+            RequestStatusEnum.OPTIMIZED.value,
+            RequestStatusEnum.DEFERRED.value
         ]))
 
     db_reqs = query.all()
@@ -84,6 +91,30 @@ def optimize_schedules(
 
     plan_a = solve_maintenance_schedule(requests, train_movements, mode="recommended")
     plan_b = solve_maintenance_schedule(requests, train_movements, mode="alternative")
+
+    # Persist decision states & retry counts back to DB
+    for decision in plan_a.decisions:
+        record = next((r for r in db_reqs if r.request_id == decision.request_id), None)
+        if record:
+            record.retry_count = decision.retry_count
+            if decision.final_status in {"Deferred", "Manual Review", "Isolated-Emergency"}:
+                record.status = decision.final_status
+
+    # Record Processing Cycle
+    app_count = sum(1 for d in plan_a.decisions if d.final_status == "Approved")
+    def_count = sum(1 for d in plan_a.decisions if d.final_status == "Deferred")
+    man_count = sum(1 for d in plan_a.decisions if d.final_status == "Manual Review")
+    iso_count = sum(1 for d in plan_a.decisions if d.final_status == "Isolated-Emergency")
+
+    cycle = DBProcessingCycle(
+        cycle_id=f"CYCLE-{uuid.uuid4().hex[:6].upper()}",
+        total_requests=len(requests),
+        approved_count=app_count,
+        deferred_count=def_count,
+        manual_review_count=man_count,
+        isolated_emergency_count=iso_count
+    )
+    db.add(cycle)
 
     db_plan_a = DBSchedulePlan(
         schedule_id=plan_a.schedule_id,
@@ -115,7 +146,10 @@ def optimize_schedules(
 
 
 @router.get("", response_model=List[Dict[str, Any]])
-def list_schedules(db: Session = Depends(get_db)):
+def list_schedules(
+    current_user: DBUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Lists all generated schedules."""
     records = db.query(DBSchedulePlan).order_by(DBSchedulePlan.created_at.desc()).all()
     return [
@@ -137,12 +171,16 @@ def list_schedules(db: Session = Depends(get_db)):
 
 
 @router.get("/{schedule_id}", response_model=SchedulePlan)
-def get_schedule(schedule_id: str, db: Session = Depends(get_db)):
+def get_schedule(
+    schedule_id: str,
+    current_user: DBUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Retrieve saved schedule plan by ID."""
     db_plan = db.query(DBSchedulePlan).filter(DBSchedulePlan.schedule_id == schedule_id).first()
     if not db_plan:
         raise HTTPException(status_code=404, detail=f"Schedule '{schedule_id}' not found.")
-    
+
     plan_data = dict(db_plan.plan_data)
     plan_data["status"] = db_plan.status
     plan_data["approved_by"] = db_plan.approved_by
@@ -156,6 +194,7 @@ def get_schedule(schedule_id: str, db: Session = Depends(get_db)):
 def approve_schedule(
     schedule_id: str,
     payload: ApprovalRequest,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -167,26 +206,36 @@ def approve_schedule(
         raise HTTPException(status_code=404, detail=f"Schedule '{schedule_id}' not found.")
 
     now_ist = datetime.now(APP_TIMEZONE)
+    user_name = payload.user_name or current_user.username
+    role = payload.role or current_user.role
+
     db_plan.status = PlanStatusEnum.APPROVED.value
-    db_plan.approved_by = payload.user_name
-    db_plan.approval_role = payload.role
+    db_plan.approved_by = user_name
+    db_plan.approval_role = role
     db_plan.approval_timestamp = now_ist
     db_plan.approval_notes = payload.notes
 
     plan_data = dict(db_plan.plan_data)
     plan_data["status"] = PlanStatusEnum.APPROVED.value
-    plan_data["approved_by"] = payload.user_name
-    plan_data["approval_role"] = payload.role
+    plan_data["approved_by"] = user_name
+    plan_data["approval_role"] = role
     plan_data["approval_timestamp"] = now_ist.isoformat()
     plan_data["approval_notes"] = payload.notes
     db_plan.plan_data = plan_data
     flag_modified(db_plan, "plan_data")
 
+    # Find application_id if available
+    first_app_id = None
+    decisions = plan_data.get("decisions", [])
+    if decisions:
+        first_app_id = decisions[0].get("application_id")
+
     audit = DBApprovalAudit(
         schedule_id=schedule_id,
+        application_id=first_app_id,
         action="APPROVED",
-        role=payload.role,
-        user_name=payload.user_name,
+        role=role,
+        user_name=user_name,
         notes=payload.notes,
         timestamp=now_ist
     )
@@ -208,6 +257,7 @@ def approve_schedule(
 def reject_schedule(
     schedule_id: str,
     payload: RejectionRequest,
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -219,26 +269,35 @@ def reject_schedule(
         raise HTTPException(status_code=404, detail=f"Schedule '{schedule_id}' not found.")
 
     now_ist = datetime.now(APP_TIMEZONE)
+    user_name = payload.user_name or current_user.username
+    role = payload.role or current_user.role
+
     db_plan.status = PlanStatusEnum.REJECTED.value
-    db_plan.approved_by = payload.user_name
-    db_plan.approval_role = payload.role
+    db_plan.approved_by = user_name
+    db_plan.approval_role = role
     db_plan.approval_timestamp = now_ist
     db_plan.approval_notes = f"REJECTED: {payload.reason}"
 
     plan_data = dict(db_plan.plan_data)
     plan_data["status"] = PlanStatusEnum.REJECTED.value
-    plan_data["approved_by"] = payload.user_name
-    plan_data["approval_role"] = payload.role
+    plan_data["approved_by"] = user_name
+    plan_data["approval_role"] = role
     plan_data["approval_timestamp"] = now_ist.isoformat()
     plan_data["approval_notes"] = f"REJECTED: {payload.reason}"
     db_plan.plan_data = plan_data
     flag_modified(db_plan, "plan_data")
 
+    first_app_id = None
+    decisions = plan_data.get("decisions", [])
+    if decisions:
+        first_app_id = decisions[0].get("application_id")
+
     audit = DBApprovalAudit(
         schedule_id=schedule_id,
+        application_id=first_app_id,
         action="REJECTED",
-        role=payload.role,
-        user_name=payload.user_name,
+        role=role,
+        user_name=user_name,
         notes=payload.reason,
         timestamp=now_ist
     )
@@ -257,13 +316,18 @@ def reject_schedule(
 
 
 @router.get("/{schedule_id}/audit", response_model=List[Dict[str, Any]])
-def get_schedule_audit(schedule_id: str, db: Session = Depends(get_db)):
+def get_schedule_audit(
+    schedule_id: str,
+    current_user: DBUser = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Retrieves full audit log history for a schedule."""
     audits = db.query(DBApprovalAudit).filter(DBApprovalAudit.schedule_id == schedule_id).order_by(DBApprovalAudit.timestamp.desc()).all()
     return [
         {
             "id": a.id,
             "schedule_id": a.schedule_id,
+            "application_id": a.application_id,
             "action": a.action,
             "role": a.role,
             "user_name": a.user_name,

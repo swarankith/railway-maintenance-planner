@@ -1,6 +1,6 @@
 """
 Ingestion API Endpoint: POST /api/v1/ingest
-Accepts PDF/DOCX/TXT file uploads, extracts requests, normalizes fields, and flags incomplete records.
+Accepts PDF/DOCX/TXT file uploads, extracts requests, normalizes fields, assigns Application ID, and flags incomplete records.
 """
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -14,8 +14,10 @@ from backend.models import (
     IngestResponse,
     DBMaintenanceRequest,
     DBTrainMovement,
+    DBUser,
     RequestStatusEnum,
 )
+from backend.auth import get_current_user
 from backend.ingestion.extractor import extract_document
 from backend.ingestion.normalizer import process_document_content
 
@@ -25,10 +27,12 @@ router = APIRouter(prefix="/api/v1", tags=["Ingestion"])
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest_document(
     file: UploadFile = File(...),
+    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Upload a maintenance work request document (PDF or DOCX).
+    Assigns unique Application ID (APP-YYYYMMDD-XXXXXX).
     Extracts text/tables, normalizes fields to canonical schema, and flags missing fields as Needs-Review.
     """
     try:
@@ -42,11 +46,10 @@ async def ingest_document(
         # Persist extracted requests into database safely
         seen_ids = set()
         for req in ingest_res.candidate_requests:
-            # Clean and ensure unique request_id within this upload batch
             clean_id = re.sub(r"\s+", "", str(req.request_id)).strip() if req.request_id else ""
             if not clean_id:
                 clean_id = f"REQ-{uuid.uuid4().hex[:6].upper()}"
-            
+
             orig_id = clean_id
             counter = 1
             while clean_id in seen_ids:
@@ -55,10 +58,10 @@ async def ingest_document(
             seen_ids.add(clean_id)
             req.request_id = clean_id
 
-            # Check if request_id already exists in database
             existing = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == req.request_id).first()
             if existing:
-                existing.department = req.department.value
+                existing.application_id = req.application_id or ingest_res.application_id
+                existing.department = str(req.department)
                 existing.corridor = req.corridor
                 existing.km_start = req.km_start
                 existing.km_end = req.km_end
@@ -82,7 +85,8 @@ async def ingest_document(
             else:
                 db_req = DBMaintenanceRequest(
                     request_id=req.request_id,
-                    department=req.department.value,
+                    application_id=req.application_id or ingest_res.application_id,
+                    department=str(req.department),
                     corridor=req.corridor,
                     km_start=req.km_start,
                     km_end=req.km_end,

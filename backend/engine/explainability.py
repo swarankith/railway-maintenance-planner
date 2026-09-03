@@ -23,13 +23,13 @@ def generate_block_explanation(
         iso_text = f" under {isolation_applied} isolation" if isolation_applied and isolation_applied != "None" else ""
         return (
             f"Dedicated single-job block on {corridor} (KM {req.km_start:.1f}-{req.km_end:.1f}) for "
-            f"{req.department.value} ({req.work_type}, {prio_label}){res_text}{iso_text}. "
+            f"{req.department} ({req.work_type}, {prio_label}){res_text}{iso_text}. "
             f"Scheduled standalone as no compatible co-located work was requested within this time window."
         )
 
     # Multi-job bundled block
-    depts = list(dict.fromkeys([r.department.value for r in requests]))
-    jobs_summary = ", ".join([f"{r.department.value} {r.work_type} (KM {r.km_start:.1f}-{r.km_end:.1f})" for r in requests])
+    depts = list(dict.fromkeys([r.department for r in requests]))
+    jobs_summary = ", ".join([f"{r.department} {r.work_type} (KM {r.km_start:.1f}-{r.km_end:.1f})" for r in requests])
     res_text = f" Shared plant/resources: {', '.join(resources_allocated)}." if resources_allocated else ""
     iso_text = f" Unified under {isolation_applied}." if isolation_applied and isolation_applied != "None" else ""
 

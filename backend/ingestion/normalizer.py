@@ -1,7 +1,11 @@
 """
 Robust Normalization Layer for Railway Maintenance Requests and Train Movements.
 Converts arbitrary tables, key-value blocks, and prose into canonical MaintenanceRequest objects.
-Flags incomplete or ambiguous records as Needs-Review (Rule 8).
+Flags incomplete or ambiguous records as Needs-Review.
+Phase 2 Updates:
+- Priority Convention: 1=Emergency, 2=High Urgent, 3=Normal (values > 3 flagged)
+- Application ID assignment: APP-YYYYMMDD-XXXXXX per document
+- Robust KM parsing and resource normalization
 """
 import re
 import uuid
@@ -17,8 +21,13 @@ from backend.models import (
     RequestStatusEnum,
     TrainMovement,
     IngestResponse,
+    generate_application_id,
 )
 from backend.ingestion.extractor import DocumentContent
+from backend.engine.conflicts import parse_km_range_robust, normalize_resource_name
+
+# Alias for backwards compatibility
+parse_km_range = parse_km_range_robust
 
 
 DEPT_PATTERNS = {
@@ -61,36 +70,6 @@ def detect_department(text: str) -> Optional[DepartmentEnum]:
     return None
 
 
-def parse_km_range(text: str) -> Tuple[Optional[float], Optional[float]]:
-    m1 = re.search(r"(?:km|kilometer|chainage)?\s*[:\s]?\s*(\d+(?:\.\d+)?)\s*(?:to|-|\/|and)\s*(?:km)?\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
-    if m1:
-        try:
-            k1 = float(m1.group(1))
-            k2 = float(m1.group(2))
-            return min(k1, k2), max(k1, k2)
-        except ValueError:
-            pass
-
-    m2 = re.search(r"(?:km|kilometer)\s*[:\s]?\s*(\d+(?:\.\d+)?)", text, re.IGNORECASE)
-    if m2:
-        try:
-            k = float(m2.group(1))
-            return k, round(k + 1.0, 2)
-        except ValueError:
-            pass
-
-    m3 = re.search(r"(\d+\.\d+)\s*(?:,|\s+)\s*(\d+\.\d+)", text)
-    if m3:
-        try:
-            k1 = float(m3.group(1))
-            k2 = float(m3.group(2))
-            return min(k1, k2), max(k1, k2)
-        except ValueError:
-            pass
-
-    return None, None
-
-
 def parse_duration_minutes(text: str) -> Optional[int]:
     t_lower = text.lower()
     m_hm = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:(\d+)\s*(?:mins?|minutes?|m))?", t_lower)
@@ -98,11 +77,11 @@ def parse_duration_minutes(text: str) -> Optional[int]:
         hours = float(m_hm.group(1))
         mins = float(m_hm.group(2)) if m_hm.group(2) else 0.0
         return int(hours * 60 + mins)
-    
+
     m_m = re.search(r"(\d+)\s*(?:mins?|minutes?|min)", t_lower)
     if m_m:
         return int(m_m.group(1))
-    
+
     m_int = re.search(r"^(\d+)$", text.strip())
     if m_int:
         val = int(m_int.group(1))
@@ -182,25 +161,33 @@ def parse_time_window(text: str, default_date: Optional[date] = None) -> Tuple[O
     return None, None
 
 
-def normalize_priority(text: str) -> Tuple[int, Optional[str]]:
+def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
+    """
+    Normalizes priority:
+    1 = Emergency
+    2 = High Urgent
+    3 = Normal
+    Returns (priority, reason, is_flagged_for_review).
+    """
     t_lower = text.lower().strip()
-    m_num = re.search(r"\b([1-5])\b", text)
+    m_num = re.search(r"\b([1-9])\b", text)
     if m_num:
         p = int(m_num.group(1))
-        return p, f"Specified as Priority {p}"
+        if p in (1, 2, 3):
+            labels = {1: "P1 - Emergency", 2: "P2 - High Urgent", 3: "P3 - Normal"}
+            return p, labels[p], False
+        else:
+            # Value > 3 flagged for human review
+            return 3, f"Priority {p} specified exceeds Phase 2 range (1-3); normalized to Normal (P3) and flagged for review", True
 
     if any(w in t_lower for w in ["critical", "emergency", "urgent", "safety defect", "derailment risk", "immediate", "p1"]):
-        return 1, "Critical urgency / safety hazard indicated in request"
+        return 1, "P1 - Emergency (Safety defect / derailment risk)", False
     elif any(w in t_lower for w in ["high", "speed restriction", "psr", "tsr removal", "p2"]):
-        return 2, "High operational urgency (speed restriction removal)"
-    elif any(w in t_lower for w in ["planned", "standard", "scheduled", "periodic", "medium", "p3"]):
-        return 3, "Standard periodic maintenance"
-    elif any(w in t_lower for w in ["minor", "inspection", "low", "preventative", "p4"]):
-        return 4, "Routine inspection / preventative work"
-    elif any(w in t_lower for w in ["routine", "deferred", "cleaning", "lowest", "p5"]):
-        return 5, "Routine deferrable work"
+        return 2, "P2 - High Urgent (Speed restriction removal)", False
+    elif any(w in t_lower for w in ["planned", "standard", "scheduled", "periodic", "medium", "normal", "p3", "p4", "p5"]):
+        return 3, "P3 - Normal (Standard maintenance)", False
 
-    return 3, "Default standard maintenance priority"
+    return 3, "P3 - Normal (Default)", False
 
 
 def normalize_block_type(text: str) -> BlockTypeEnum:
@@ -216,11 +203,17 @@ def extract_resources(text: str) -> List[str]:
     found = []
     for r in RESOURCE_KEYWORDS:
         if re.search(r"\b" + re.escape(r) + r"\b", text, re.IGNORECASE):
-            found.append(r)
+            found.append(normalize_resource_name(r).title())
     return list(dict.fromkeys(found))
 
 
-def normalize_table_data(table: List[List[str]], source_filename: str) -> List[MaintenanceRequest]:
+def normalize_table_data(
+    table: List[List[str]],
+    source_filename: str,
+    application_id: Optional[str] = None
+) -> List[MaintenanceRequest]:
+    if application_id is None:
+        application_id = generate_application_id()
     if len(table) < 2:
         return []
 
@@ -283,7 +276,7 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
         dept_str = get_col("dept")
         work_str = get_col("work_type") or "Track Maintenance"
         asset_str = get_col("asset") or "Track Infrastructure"
-        
+
         dept = detect_department(dept_str) or detect_department(work_str) or detect_department(asset_str) or DepartmentEnum.ENGINEERING
 
         km_s, km_e = None, None
@@ -293,10 +286,10 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
                 km_e = float(re.sub(r"[^\d.]", "", get_col("km_end")))
             except (ValueError, TypeError):
                 pass
-        
+
         if (km_s is None or km_e is None) and ("km_range" in col_map or "corridor" in col_map):
             combined_km_txt = f"{get_col('km_range')} {get_col('corridor')}"
-            km_s, km_e = parse_km_range(combined_km_txt)
+            km_s, km_e = parse_km_range_robust(combined_km_txt)
 
         row_date = base_date
         if "date" in col_map and get_col("date"):
@@ -310,7 +303,7 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
             t_end = parse_datetime_flexible(get_col("end_time"), row_date)
         elif "time_window" in col_map:
             t_start, t_end = parse_time_window(get_col("time_window"), row_date)
-        
+
         duration = None
         if "duration" in col_map:
             duration = parse_duration_minutes(get_col("duration"))
@@ -323,7 +316,7 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
             t_start = datetime.combine(row_date, datetime.min.time(), tzinfo=APP_TIMEZONE) + timedelta(hours=1)
             t_end = t_start + timedelta(hours=5)
 
-        priority_val, prio_reason = normalize_priority(get_col("priority") or work_str)
+        priority_val, prio_reason, prio_flagged = normalize_priority(get_col("priority") or work_str)
         block_type = normalize_block_type(get_col("block_type") or work_str)
 
         res_str = get_col("resources")
@@ -343,9 +336,11 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
             missing.append("earliest_start")
         if t_end is None:
             missing.append("latest_end")
+        if prio_flagged:
+            missing.append("priority_review")
 
         status = RequestStatusEnum.NEEDS_REVIEW if missing else RequestStatusEnum.CONFIRMED
-        
+
         f_km_s = km_s if km_s is not None else 0.0
         f_km_e = km_e if km_e is not None else 1.0
         f_corridor = corridor if corridor else "UNSPECIFIED-CORRIDOR"
@@ -355,7 +350,8 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
 
         req = MaintenanceRequest(
             request_id=req_id,
-            department=dept,
+            application_id=application_id,
+            department=dept.value,
             corridor=f_corridor,
             km_start=f_km_s,
             km_end=f_km_e,
@@ -381,7 +377,13 @@ def normalize_table_data(table: List[List[str]], source_filename: str) -> List[M
     return results
 
 
-def normalize_prose_text(raw_text: str, source_filename: str) -> Tuple[List[MaintenanceRequest], List[TrainMovement]]:
+def normalize_prose_text(
+    raw_text: str,
+    source_filename: str,
+    application_id: Optional[str] = None
+) -> Tuple[List[MaintenanceRequest], List[TrainMovement]]:
+    if application_id is None:
+        application_id = generate_application_id()
     requests: List[MaintenanceRequest] = []
     trains: List[TrainMovement] = []
 
@@ -428,7 +430,7 @@ def normalize_prose_text(raw_text: str, source_filename: str) -> Tuple[List[Main
             if pair_m:
                 corridor = re.sub(r"\s+", "", pair_m.group(1))
 
-        km_s, km_e = parse_km_range(chunk_clean)
+        km_s, km_e = parse_km_range_robust(chunk_clean)
         dept = detect_department(chunk_clean) or DepartmentEnum.ENGINEERING
         duration = parse_duration_minutes(chunk_clean)
         t_start, t_end = parse_time_window(chunk_clean, base_date)
@@ -438,7 +440,7 @@ def normalize_prose_text(raw_text: str, source_filename: str) -> Tuple[List[Main
         elif duration and t_start and not t_end:
             t_end = t_start + timedelta(minutes=duration)
 
-        priority_val, prio_reason = normalize_priority(chunk_clean)
+        priority_val, prio_reason, prio_flagged = normalize_priority(chunk_clean)
         block_type = normalize_block_type(chunk_clean)
         resources = extract_resources(chunk_clean)
         isolation = "Power Block (OHE)" if ("power block" in chunk_clean.lower() or dept == DepartmentEnum.ELECTRICAL) else "None"
@@ -468,6 +470,8 @@ def normalize_prose_text(raw_text: str, source_filename: str) -> Tuple[List[Main
             missing.append("earliest_start")
         if t_end is None:
             missing.append("latest_end")
+        if prio_flagged:
+            missing.append("priority_review")
 
         status = RequestStatusEnum.NEEDS_REVIEW if missing else RequestStatusEnum.CONFIRMED
 
@@ -480,7 +484,8 @@ def normalize_prose_text(raw_text: str, source_filename: str) -> Tuple[List[Main
 
         req = MaintenanceRequest(
             request_id=f"REQ-{uuid.uuid4().hex[:6].upper()}",
-            department=dept,
+            application_id=application_id,
+            department=dept.value,
             corridor=f_corridor,
             km_start=f_km_s,
             km_end=f_km_e,
@@ -507,23 +512,22 @@ def normalize_prose_text(raw_text: str, source_filename: str) -> Tuple[List[Main
 
 
 def process_document_content(doc: DocumentContent) -> IngestResponse:
+    application_id = generate_application_id()
     all_requests: List[MaintenanceRequest] = []
     all_trains: List[TrainMovement] = []
     warnings: List[str] = []
 
     for table in doc.tables:
-        table_reqs = normalize_table_data(table, doc.filename)
+        table_reqs = normalize_table_data(table, doc.filename, application_id)
         all_requests.extend(table_reqs)
 
     if not all_requests or len(doc.raw_text.strip()) > 50:
-        prose_reqs, prose_trains = normalize_prose_text(doc.raw_text, doc.filename)
+        prose_reqs, prose_trains = normalize_prose_text(doc.raw_text, doc.filename, application_id)
         all_trains.extend(prose_trains)
         if not all_requests:
             all_requests.extend(prose_reqs)
         else:
-            # Also append prose requests that have unique content
             for pr in prose_reqs:
-                # Check if already in table
                 is_duplicate = any(
                     r.corridor == pr.corridor and abs(r.km_start - pr.km_start) < 0.5 and r.department == pr.department
                     for r in all_requests
@@ -538,6 +542,7 @@ def process_document_content(doc: DocumentContent) -> IngestResponse:
         warnings.append(f"No maintenance requests could be extracted from {doc.filename}. Please check file layout.")
 
     return IngestResponse(
+        application_id=application_id,
         filename=doc.filename,
         total_extracted=len(all_requests),
         confirmed_count=len(confirmed),

@@ -354,7 +354,7 @@ class DBUser(Base):
 
 class DBMaintenanceRequest(Base):
     __tablename__ = "maintenance_requests"
-
+    
     id = Column(Integer, primary_key=True, autoincrement=True)
     request_id = Column(String(64), unique=True, index=True, nullable=False)
     application_id = Column(String(64), index=True, nullable=True)
@@ -382,7 +382,7 @@ class DBMaintenanceRequest(Base):
     retry_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE), onupdate=lambda: datetime.now(APP_TIMEZONE))
-
+    isolated_at = Column(DateTime(timezone=True), nullable=True)
 
 class DBTrainMovement(Base):
     __tablename__ = "train_movements"

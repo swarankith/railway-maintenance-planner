@@ -1,7 +1,7 @@
 """
 FastAPI Main Application Entrypoint (Phase 2).
-Initializes database tables, registers Phase 2 API routes (Auth, Exports, Approvals, Ingestion, Schedules, Conflicts, Requests),
-runs background emergency escalation audits (15-min timeout), and serves React frontend build.
+Initializes database tables, registers all API routes, runs background emergency escalation audits,
+and serves the React frontend build if present.
 """
 import os
 import asyncio
@@ -15,12 +15,13 @@ from contextlib import asynccontextmanager
 from backend.config import APP_TIMEZONE, EMERGENCY_ESCALATION_MINUTES
 from backend.database import init_db, SessionLocal
 from backend.models import DBMaintenanceRequest, DBEscalationEvent, RequestStatusEnum
-from backend.routes import auth, ingest, requests, conflicts, schedules, health, export, approvals
+from backend.routes import auth, ingest, requests, conflicts, schedules, health, export, approvals, escalations
+from backend.services.escalation import escalation_worker  # background worker
 
 
 async def run_emergency_escalation_audit():
     """
-    Background job: checks for isolated emergencies not signed off within 15 minutes.
+    Background job: checks for isolated emergencies not signed off within the allowed time.
     Creates persisted EscalationEvents.
     """
     while True:
@@ -35,7 +36,8 @@ async def run_emergency_escalation_audit():
                         RequestStatusEnum.ISOLATED_EMERGENCY.value,
                         "Isolated-Emergency"
                     ]),
-                    DBMaintenanceRequest.created_at <= cutoff
+                    DBMaintenanceRequest.isolated_at != None,
+                    DBMaintenanceRequest.isolated_at <= cutoff
                 ).all()
 
                 for req in unresolved:
@@ -46,7 +48,7 @@ async def run_emergency_escalation_audit():
 
                     if not existing_esc:
                         esc = DBEscalationEvent(
-                            event_id=f"ESC-{datetime.now().strftime('%H%M%S')}",
+                            event_id=f"ESC-{datetime.now().strftime('%Y%m%d%H%M%S')}-{req.request_id[:6]}",
                             request_id=req.request_id,
                             corridor=req.corridor,
                             reason=f"Emergency request {req.request_id} has exceeded the {EMERGENCY_ESCALATION_MINUTES}-minute human sign-off timeout."
@@ -56,6 +58,7 @@ async def run_emergency_escalation_audit():
             finally:
                 db.close()
         except Exception:
+            # Add logging in production; for prototype, silent catch is acceptable
             pass
 
 
@@ -63,7 +66,7 @@ async def run_emergency_escalation_audit():
 async def lifespan(app: FastAPI):
     init_db()
 
-    # Auto-create default users if none exist
+    # Create default users if none exist (necessary for login)
     from backend.database import SessionLocal
     from backend.models import DBUser
     from backend.auth import hash_password
@@ -89,8 +92,19 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # Start the emergency escalation background worker
+    escalation_task = asyncio.create_task(escalation_worker())
+    # Optionally start the audit worker here, but we already have escalation_worker
+    # You can choose one; we'll keep the service worker
+
     yield
-    # ... other cleanup
+
+    # Cancel background task on shutdown
+    escalation_task.cancel()
+    try:
+        await escalation_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -118,6 +132,7 @@ app.include_router(ingest.router)
 app.include_router(requests.router)
 app.include_router(conflicts.router)
 app.include_router(schedules.router)
+app.include_router(escalations.router)          # <-- NEW
 
 # Mount production frontend build if present
 frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))

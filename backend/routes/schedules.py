@@ -1,11 +1,5 @@
 """
-Schedule Optimization & Approval API Endpoints:
-- POST /api/v1/schedules/optimize
-- GET /api/v1/schedules/{id}
-- POST /api/v1/schedules/{id}/approve
-- POST /api/v1/schedules/{id}/reject
-- GET /api/v1/schedules
-- GET /api/v1/schedules/{id}/audit
+Schedule Optimization & Approval API Endpoints.
 Protected by JWT Authentication.
 """
 import json
@@ -93,12 +87,16 @@ def optimize_schedules(
     plan_b = solve_maintenance_schedule(requests, train_movements, mode="alternative")
 
     # Persist decision states & retry counts back to DB
+    now_ist = datetime.now(APP_TIMEZONE)
     for decision in plan_a.decisions:
         record = next((r for r in db_reqs if r.request_id == decision.request_id), None)
         if record:
             record.retry_count = decision.retry_count
             if decision.final_status in {"Deferred", "Manual Review", "Isolated-Emergency"}:
                 record.status = decision.final_status
+            if decision.final_status == "Isolated-Emergency":
+                # Set isolation timestamp for emergency escalation tracking
+                record.isolated_at = now_ist
 
     # Record Processing Cycle
     app_count = sum(1 for d in plan_a.decisions if d.final_status == "Approved")
@@ -224,11 +222,15 @@ def approve_schedule(
     db_plan.plan_data = plan_data
     flag_modified(db_plan, "plan_data")
 
-    # Find application_id if available
+    # Extract application_id from first block's request_ids
     first_app_id = None
-    decisions = plan_data.get("decisions", [])
-    if decisions:
-        first_app_id = decisions[0].get("application_id")
+    blocks = plan_data.get("blocks", [])
+    if blocks:
+        first_req_id = blocks[0].get("request_ids", [None])[0]
+        if first_req_id:
+            req_rec = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == first_req_id).first()
+            if req_rec:
+                first_app_id = req_rec.application_id
 
     audit = DBApprovalAudit(
         schedule_id=schedule_id,
@@ -287,10 +289,15 @@ def reject_schedule(
     db_plan.plan_data = plan_data
     flag_modified(db_plan, "plan_data")
 
+    # Extract application_id from first block's request_ids
     first_app_id = None
-    decisions = plan_data.get("decisions", [])
-    if decisions:
-        first_app_id = decisions[0].get("application_id")
+    blocks = plan_data.get("blocks", [])
+    if blocks:
+        first_req_id = blocks[0].get("request_ids", [None])[0]
+        if first_req_id:
+            req_rec = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == first_req_id).first()
+            if req_rec:
+                first_app_id = req_rec.application_id
 
     audit = DBApprovalAudit(
         schedule_id=schedule_id,

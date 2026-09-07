@@ -209,15 +209,14 @@ export async function checkConflicts(requestIds?: string[]): Promise<ConflictDet
 
 // Scheduling & Deterministic Optimization
 export async function optimizeSchedule(requestIds?: string[]): Promise<SchedulePlan> {
-  // Phase 2: use /process endpoint for batch engine
-  const res = await fetch(`${API_BASE}/process`, {
+  const res = await fetch(`${API_BASE}/schedules/optimize`, {   // ✅ correct path
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify(requestIds || null),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || 'Processing failed');
+    throw new Error(err.detail || 'Optimization failed');
   }
   return res.json();
 }

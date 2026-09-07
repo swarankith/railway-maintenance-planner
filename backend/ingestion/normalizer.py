@@ -511,8 +511,8 @@ def normalize_prose_text(
     return requests, trains
 
 
-def process_document_content(doc: DocumentContent) -> IngestResponse:
-    application_id = generate_application_id()
+def process_document_content(doc: DocumentContent, doc_type: Optional[str] = None) -> IngestResponse:
+    application_id = generate_application_id()   # <-- ADD THIS LINE
     all_requests: List[MaintenanceRequest] = []
     all_trains: List[TrainMovement] = []
     warnings: List[str] = []

@@ -25,6 +25,8 @@ interface UploadModalProps {
   requests: MaintenanceRequest[];
 }
 
+type UploadType = 'request' | 'train_movement' | 'corridor_availability';
+
 export const UploadModal: React.FC<UploadModalProps> = ({
   onIngestSuccess,
   onEditRequest,
@@ -35,20 +37,21 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [uploading, setUploading] = useState(false);
   const [ingestResult, setIngestResult] = useState<IngestResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploadType, setUploadType] = useState<UploadType>('request');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileUpload = async (file: File) => {
     if (!file) return;
     const ext = file.name.split('.').pop()?.toLowerCase();
     if (!['pdf', 'docx', 'doc', 'txt'].includes(ext || '')) {
-      setError('Please upload a valid PDF or DOCX railway maintenance request document.');
+      setError('Please upload a valid PDF or DOCX document.');
       return;
     }
 
     setUploading(true);
     setError(null);
     try {
-      const res = await ingestDocument(file);
+      const res = await ingestDocument(file, uploadType);
       setIngestResult(res);
       onIngestSuccess();
     } catch (err: any) {
@@ -100,6 +103,40 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Upload Type Tabs */}
+      <div className="flex gap-2 mb-4 flex-wrap">
+        <button
+          onClick={() => setUploadType('request')}
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition ${
+            uploadType === 'request'
+              ? 'bg-blue-800 text-white shadow-md'
+              : 'bg-white text-blue-800 border border-blue-300 hover:bg-blue-50'
+          }`}
+        >
+          Maintenance Requests
+        </button>
+        <button
+          onClick={() => setUploadType('train_movement')}
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition ${
+            uploadType === 'train_movement'
+              ? 'bg-blue-800 text-white shadow-md'
+              : 'bg-white text-blue-800 border border-blue-300 hover:bg-blue-50'
+          }`}
+        >
+          Train Movements
+        </button>
+        <button
+          onClick={() => setUploadType('corridor_availability')}
+          className={`px-4 py-2 rounded-xl text-sm font-bold transition ${
+            uploadType === 'corridor_availability'
+              ? 'bg-blue-800 text-white shadow-md'
+              : 'bg-white text-blue-800 border border-blue-300 hover:bg-blue-50'
+          }`}
+        >
+          Corridor Availability
+        </button>
+      </div>
+
       {/* Upload Drag & Drop Area */}
       <div
         onDragOver={handleDragOver}
@@ -136,18 +173,31 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           <div>
             <h3 className="text-base sm:text-lg font-black text-navy-950">
               {uploading
-                ? 'Parsing & Normalizing Maintenance Requests...'
-                : 'Upload Maintenance Work Request Documents'}
+                ? 'Parsing & Normalizing...'
+                : uploadType === 'train_movement'
+                  ? 'Upload Scheduled Train Movement Documents'
+                  : uploadType === 'corridor_availability'
+                    ? 'Upload Corridor Availability Windows'
+                    : 'Upload Maintenance Work Request Documents'}
             </h3>
             <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-md mx-auto">
-              Drag & drop any <span className="text-saffron-600 font-bold">PDF or DOCX</span> circular (Engineering, S&T, Electrical work schedules, tables, or plain prose memos).
+              {uploadType === 'train_movement'
+                ? 'Drag & drop PDF/DOCX files containing train schedules.'
+                : uploadType === 'corridor_availability'
+                  ? 'Drag & drop PDF/DOCX files containing corridor availability windows.'
+                  : 'Drag & drop any PDF or DOCX circular (Engineering, S&T, Electrical work schedules, tables, or plain prose memos).'}
             </p>
           </div>
 
           <div className="flex items-center gap-3 text-xs text-slate-500 pt-2 font-semibold">
             <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">PDF Tables & Forms</span>
             <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">DOCX Circulars</span>
-            <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">Train Movement Records</span>
+            {uploadType === 'train_movement' && (
+              <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">Train Schedules</span>
+            )}
+            {uploadType === 'corridor_availability' && (
+              <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">Availability Windows</span>
+            )}
           </div>
         </div>
       </div>
@@ -176,7 +226,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                Found {ingestResult.total_extracted} total candidate requests (
+                Found {ingestResult.total_extracted} total candidate records (
                 <span className="text-emerald-700 font-bold">{ingestResult.confirmed_count} ready</span>,{' '}
                 <span className="text-amber-700 font-bold">{ingestResult.needs_review_count} needs review</span>
                 {ingestResult.detected_trains.length > 0 && `, ${ingestResult.detected_trains.length} train movements`}
@@ -339,7 +389,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       {requests.length === 0 && !uploading && (
         <div className="text-center py-12 px-4 bg-white border border-slate-200 rounded-2xl shadow-sm">
           <FileText className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-          <h4 className="text-sm font-bold text-slate-800">No maintenance requests in database</h4>
+          <h4 className="text-sm font-bold text-slate-800">No records in database</h4>
           <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
             Starts with an empty database. Upload a PDF or DOCX document above to begin ingestion.
           </p>

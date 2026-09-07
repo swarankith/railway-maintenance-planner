@@ -2,9 +2,9 @@
 Ingestion API Endpoint: POST /api/v1/ingest
 Accepts PDF/DOCX/TXT file uploads, extracts requests, normalizes fields, assigns Application ID, and flags incomplete records.
 """
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 import re
 import uuid
 
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/v1", tags=["Ingestion"])
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest_document(
     file: UploadFile = File(...),
+    doc_type: Optional[str] = Query(None, enum=["request", "train_movement", "corridor_availability"]),
     current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -34,6 +35,7 @@ async def ingest_document(
     Upload a maintenance work request document (PDF or DOCX).
     Assigns unique Application ID (APP-YYYYMMDD-XXXXXX).
     Extracts text/tables, normalizes fields to canonical schema, and flags missing fields as Needs-Review.
+    The `doc_type` query parameter hints the classifier which kind of document is being uploaded.
     """
     try:
         content_bytes = await file.read()
@@ -41,7 +43,8 @@ async def ingest_document(
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         doc_content = extract_document(content_bytes, file.filename)
-        ingest_res = process_document_content(doc_content)
+        # Pass doc_type to the normalizer if provided
+        ingest_res = process_document_content(doc_content, doc_type=doc_type)
 
         # Persist extracted requests into database safely
         seen_ids = set()

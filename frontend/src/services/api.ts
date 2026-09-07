@@ -67,7 +67,7 @@ function getAuthHeaders(isJson: boolean = true): HeadersInit {
 }
 
 // Authentication Endpoints
-export async function loginUser(username: string, password: string):Promise<{ access_token: string; user: User }> {
+export async function loginUser(username: string, password: string): Promise<{ access_token: string; user: User }> {
   const res = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -99,10 +99,10 @@ export async function fetchHealth() {
 }
 
 // Ingestion
-export async function ingestDocument(file: File): Promise<IngestResponse> {
+export async function ingestDocument(file: File, docType: string = 'request'): Promise<IngestResponse> {
   const formData = new FormData();
   formData.append('file', file);
-  const res = await fetch(`${API_BASE}/ingest`, {
+  const res = await fetch(`${API_BASE}/ingest?doc_type=${docType}`, {
     method: 'POST',
     headers: {
       ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
@@ -209,14 +209,15 @@ export async function checkConflicts(requestIds?: string[]): Promise<ConflictDet
 
 // Scheduling & Deterministic Optimization
 export async function optimizeSchedule(requestIds?: string[]): Promise<SchedulePlan> {
-  const res = await fetch(`${API_BASE}/schedules/optimize`, {
+  // Phase 2: use /process endpoint for batch engine
+  const res = await fetch(`${API_BASE}/process`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify(requestIds || null),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || 'Optimization failed');
+    throw new Error(err.detail || 'Processing failed');
   }
   return res.json();
 }

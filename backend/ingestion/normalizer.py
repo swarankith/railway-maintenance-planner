@@ -311,7 +311,9 @@ def normalize_train_table(
     col_map = {}
     for idx, col in enumerate(header):
         c = col.strip().lower()
-        if any(k in c for k in ["train_number", "train_no", "train no", "train number", "train #", "train_id", "train id", "service no", "train", "id"]):
+        if any(k in c for k in ["train_name", "train name", "service name", "service_name"]):
+            col_map["train_name"] = idx
+        elif any(k in c for k in ["train_number", "train_no", "train no", "train number", "train #", "train_id", "train id", "service no", "train", "id"]):
             if "train_id" not in col_map:
                 col_map["train_id"] = idx
         elif any(k in c for k in ["corridor", "section", "route", "line", "block_section", "block section", "sector"]):
@@ -326,14 +328,12 @@ def normalize_train_table(
             col_map["arr"] = idx
         elif any(k in c for k in ["window", "time_window", "time window", "timings", "timing", "slot", "schedule"]):
             col_map["time_window"] = idx
-        elif any(k in c for k in ["km_start", "km_from", "from_km", "start_km", "from km", "start km"]):
+        elif any(k in c for k in ["km_start", "km start", "start_km", "start km", "km_from", "km from", "from_km"]):
             col_map["km_start"] = idx
-        elif any(k in c for k in ["km_end", "km_to", "to_km", "end_km", "to km", "end km"]):
+        elif any(k in c for k in ["km_end", "km end", "end_km", "end km", "km_to", "km to", "to_km"]):
             col_map["km_end"] = idx
         elif any(k in c for k in ["km", "chainage", "km_range", "km range", "span", "km span", "distance"]):
             col_map["km_range"] = idx
-        elif any(k in c for k in ["train_name", "train name", "name", "service name", "title", "description"]):
-            col_map["train_name"] = idx
         elif any(k in c for k in ["speed", "speed_kmh", "speed kmh", "mps", "max speed", "kmph"]):
             col_map["speed"] = idx
         elif any(k in c for k in ["train_type", "type", "category", "class"]):
@@ -372,8 +372,8 @@ def normalize_train_table(
             if f_stn and t_stn:
                 corridor = f"{f_stn}-{t_stn}".replace(" ", "").upper()
 
-        # 2. Check all cells in row for a corridor/station pair
-        if not corridor:
+        # 2. Check all cells in row for a corridor/station pair (only if no dedicated corridor column)
+        if not corridor and "corridor" not in col_map:
             for cell in row:
                 c_cand = extract_corridor_from_string(str(cell))
                 if c_cand:
@@ -979,17 +979,18 @@ def process_document_content(doc: DocumentContent, doc_type: str = "request") ->
             table_trains = normalize_train_table(table, doc.filename, doc_corridor=doc_corridor)
             all_trains.extend(table_trains)
 
-        # Robust extraction from raw text/prose lines
-        text_trains = extract_trains_from_text(doc.raw_text, doc.filename, doc_corridor=doc_corridor)
-        for tt in text_trains:
-            if not any(
-                t.train_id == tt.train_id or (
-                    t.corridor == tt.corridor and
-                    abs((t.departure_time - tt.departure_time).total_seconds()) < 600
-                )
-                for t in all_trains
-            ):
-                all_trains.append(tt)
+        # Fallback extraction from raw text/prose lines if no structured tables found
+        if not all_trains:
+            text_trains = extract_trains_from_text(doc.raw_text, doc.filename, doc_corridor=doc_corridor)
+            for tt in text_trains:
+                if not any(
+                    t.train_id == tt.train_id or (
+                        t.corridor == tt.corridor and
+                        abs((t.departure_time - tt.departure_time).total_seconds()) < 600
+                    )
+                    for t in all_trains
+                ):
+                    all_trains.append(tt)
 
         if not all_trains:
             warnings.append(f"No train movements could be extracted from {doc.filename}. Check column headers or text format.")

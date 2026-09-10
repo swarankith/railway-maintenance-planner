@@ -17,8 +17,9 @@ import {
   ZoomOut,
   HelpCircle,
   FileText,
+  ShieldAlert,
 } from 'lucide-react';
-import { SchedulePlan, MaintenanceBlock, TrainMovement, ActiveTab, MaintenanceRequest } from '../types';
+import { SchedulePlan, MaintenanceBlock, TrainMovement, ActiveTab, MaintenanceRequest, RequestDecision } from '../types';
 
 interface GanttChartProps {
   schedulePlan: SchedulePlan | null;
@@ -143,6 +144,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
 
   const deferredRequests = currentPlan?.deferred_requests || [];
   const manualReviewRequests = currentPlan?.manual_review_requests || [];
+  const isolatedEmergencyRequests = currentPlan?.isolated_emergency_requests || [];
 
   if (!schedulePlan || schedulePlan.blocks.length === 0) {
     return (
@@ -436,6 +438,8 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                           const width = getPixelWidth(block.scheduled_start, block.scheduled_end);
                           const isMultiDept = block.departments.length > 1;
 
+                          const isEmergency = block.block_id.startsWith('EMG-BLK') || block.isolation_applied?.includes('Emergency');
+
                           return (
                             <div
                               key={block.block_id}
@@ -443,7 +447,9 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                               style={{ left: `${left}px`, width: `${width}px` }}
                               title={`${block.block_id} (${block.departments.join(', ')}) | ${block.requests.length} Jobs | KM ${block.km_start}-${block.km_end}`}
                               className={`absolute top-0 bottom-0 rounded-lg px-2 py-0.5 cursor-pointer shadow-sm border flex items-center justify-between overflow-hidden text-white transition-transform hover:scale-[1.02] hover:z-30 text-[10px] ${
-                                isMultiDept
+                                isEmergency
+                                  ? 'bg-rose-700 border-rose-900 text-white font-bold ring-1 ring-rose-400'
+                                  : isMultiDept
                                   ? 'bg-gradient-to-r from-navy-800 via-saffron-600 to-emerald-700 border-saffron-400'
                                   : block.departments.includes('Electrical')
                                   ? 'bg-amber-700 border-amber-800 text-white'
@@ -452,7 +458,9 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                                   : 'bg-blue-800 border-blue-900 text-white'
                               }`}
                             >
-                              <span className="font-mono font-bold truncate mr-1">{block.block_id}</span>
+                              <span className="font-mono font-bold truncate mr-1">
+                                {isEmergency && '⚠ '}{block.block_id}
+                              </span>
                               <span className="text-[8px] bg-black/30 px-1 py-0.2 rounded shrink-0">
                                 {block.requests.length}J
                               </span>
@@ -497,98 +505,162 @@ export const GanttChart: React.FC<GanttChartProps> = ({
         </div>
       </div>
 
-      {/* Placeholders for Deferred and Manual Review Requests */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Panels for Deferred, Manual Review, and Isolated Emergency Requests */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Deferred Requests */}
-        <div className="bg-white border border-amber-200 rounded-3xl p-5 shadow-sm space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-amber-600" />
-              <h3 className="font-bold text-sm text-navy-950">
-                Deferred Requests ({deferredRequests.length})
-              </h3>
+        <div className="bg-white border border-amber-200 rounded-3xl p-5 shadow-sm space-y-3 flex flex-col justify-between">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-amber-600" />
+                <h3 className="font-bold text-sm text-navy-950">
+                  Deferred Requests ({deferredRequests.length})
+                </h3>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold border border-amber-300">
+                Retries &lt; 3
+              </span>
             </div>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold border border-amber-300">
-              Retries &lt; 3 (Roll to next cycle)
-            </span>
-          </div>
-          <p className="text-xs text-slate-500">
-            Requests that could not fit into current corridor windows without violating safety buffers or emergency precedence. Eligible for immediate replay.
-          </p>
+            <p className="text-xs text-slate-500">
+              Requests that could not fit into current corridor windows without violating safety buffers. Eligible for next cycle.
+            </p>
 
-          {deferredRequests.length === 0 ? (
-            <div className="text-xs text-slate-400 py-3 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
-              No requests currently deferred in this cycle.
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-              {deferredRequests.map((req: MaintenanceRequest) => (
-                <div
-                  key={req.request_id}
-                  className="p-2.5 bg-amber-50/50 border border-amber-200 rounded-xl flex items-center justify-between text-xs"
-                >
-                  <div>
-                    <div className="font-bold text-navy-950 flex items-center gap-1.5">
-                      <span>{req.request_id}</span>
-                      <span className="text-[10px] text-slate-500 font-normal">({req.department})</span>
+            {deferredRequests.length === 0 ? (
+              <div className="text-xs text-slate-400 py-4 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                No requests currently deferred in this cycle.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                {deferredRequests.map((dec: RequestDecision) => (
+                  <div
+                    key={dec.request_id}
+                    className="p-2.5 bg-amber-50/60 border border-amber-200 rounded-xl flex items-start justify-between gap-2 text-xs"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="font-bold text-navy-950 flex items-center gap-1.5">
+                        <span>{dec.request_id}</span>
+                        {dec.bundle_id && (
+                          <span className="text-[9px] bg-amber-200/80 text-amber-900 px-1.5 py-0.2 rounded font-mono font-bold">
+                            {dec.bundle_id}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-600 leading-tight">
+                        {dec.reason}
+                      </div>
                     </div>
-                    <div className="text-[11px] text-slate-600">
-                      {req.corridor} | KM {req.km_start.toFixed(1)}–{req.km_end.toFixed(1)} | {req.work_type}
-                    </div>
+                    {dec.retry_count !== undefined && dec.retry_count > 0 && (
+                      <span className="font-mono text-[10px] font-bold text-amber-800 bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded shrink-0">
+                        Retry #{dec.retry_count}/3
+                      </span>
+                    )}
                   </div>
-                  <span className="font-mono text-[10px] font-bold text-amber-800">
-                    Retry #{req.retry_count || 1}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Manual Review Requests */}
-        <div className="bg-white border border-rose-200 rounded-3xl p-5 shadow-sm space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-rose-600" />
-              <h3 className="font-bold text-sm text-navy-950">
-                Manual Review Required ({manualReviewRequests.length})
-              </h3>
+        <div className="bg-white border border-rose-200 rounded-3xl p-5 shadow-sm space-y-3 flex flex-col justify-between">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600" />
+                <h3 className="font-bold text-sm text-navy-950">
+                  Manual Review Required ({manualReviewRequests.length})
+                </h3>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold border border-rose-300">
+                Arbitration Required
+              </span>
             </div>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold border border-rose-300">
-              Retries &ge; 3 / Rule C Exclusions
-            </span>
-          </div>
-          <p className="text-xs text-slate-500">
-            Jobs that exceeded the retry threshold or have hard physical incompatibility conflicts requiring manual controller arbitration.
-          </p>
+            <p className="text-xs text-slate-500">
+              Jobs with physical conflicts, Rule C exclusions, unrecognised work types, or retry cap reaching 3.
+            </p>
 
-          {manualReviewRequests.length === 0 ? (
-            <div className="text-xs text-slate-400 py-3 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
-              No requests flagged for manual controller arbitration.
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-              {manualReviewRequests.map((req: MaintenanceRequest) => (
-                <div
-                  key={req.request_id}
-                  className="p-2.5 bg-rose-50/50 border border-rose-200 rounded-xl flex items-center justify-between text-xs"
-                >
-                  <div>
-                    <div className="font-bold text-navy-950 flex items-center gap-1.5">
-                      <span>{req.request_id}</span>
-                      <span className="text-[10px] text-slate-500 font-normal">({req.department})</span>
+            {manualReviewRequests.length === 0 ? (
+              <div className="text-xs text-slate-400 py-4 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                No requests flagged for manual controller arbitration.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                {manualReviewRequests.map((dec: RequestDecision) => (
+                  <div
+                    key={dec.request_id}
+                    className="p-2.5 bg-rose-50/60 border border-rose-200 rounded-xl flex items-start justify-between gap-2 text-xs"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="font-bold text-navy-950 flex items-center gap-1.5">
+                        <span>{dec.request_id}</span>
+                        <span className="text-[9px] bg-rose-100 text-rose-800 border border-rose-200 px-1.5 py-0.2 rounded font-mono font-bold">
+                          Manual Review
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-600 leading-tight">
+                        {dec.reason}
+                      </div>
                     </div>
-                    <div className="text-[11px] text-slate-600">
-                      {req.corridor} | KM {req.km_start.toFixed(1)}–{req.km_end.toFixed(1)} | {req.work_type}
-                    </div>
+                    {dec.retry_count !== undefined && dec.retry_count >= 3 && (
+                      <span className="font-mono text-[10px] font-bold text-rose-700 bg-rose-100 border border-rose-300 px-1.5 py-0.5 rounded shrink-0">
+                        Cap 3/3
+                      </span>
+                    )}
                   </div>
-                  <span className="font-mono text-[10px] font-bold text-rose-700 bg-rose-100 px-2 py-0.5 rounded">
-                    Needs Manual Plan
-                  </span>
-                </div>
-              ))}
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Isolated Emergencies */}
+        <div className="bg-white border border-red-200 rounded-3xl p-5 shadow-sm space-y-3 flex flex-col justify-between">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-red-600" />
+                <h3 className="font-bold text-sm text-navy-950">
+                  Isolated Emergencies ({isolatedEmergencyRequests.length})
+                </h3>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-800 font-bold border border-red-300 animate-pulse">
+                Pending Human Sign-off
+              </span>
             </div>
-          )}
+            <p className="text-xs text-slate-500">
+              High-priority emergency tracks isolated on dedicated lanes. Handled as safety-critical blocks on the timeline.
+            </p>
+
+            {isolatedEmergencyRequests.length === 0 ? (
+              <div className="text-xs text-slate-400 py-4 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                No emergency isolation requests currently active.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                {isolatedEmergencyRequests.map((dec: RequestDecision) => (
+                  <div
+                    key={dec.request_id}
+                    className="p-2.5 bg-red-50/70 border border-red-200 rounded-xl flex items-start justify-between gap-2 text-xs"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="font-bold text-navy-950 flex items-center gap-1.5">
+                        <span>{dec.request_id}</span>
+                        <span className="text-[9px] bg-red-600 text-white px-1.5 py-0.2 rounded font-mono font-bold">
+                          P1 Emergency
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-700 leading-tight">
+                        {dec.reason}
+                      </div>
+                    </div>
+                    <span className="font-mono text-[9px] font-bold text-red-700 bg-white border border-red-300 px-1.5 py-0.5 rounded shrink-0">
+                      Sign-off Req.
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

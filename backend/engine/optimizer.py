@@ -274,5 +274,8 @@ def solve_maintenance_schedule(requests: List[MaintenanceRequest], train_movemen
         total_jobs_requested=len(eligible),
         bundling_efficiency_percentage=efficiency,
         summary_explanation=generate_plan_summary("Batch decision recommendation", len(blocks), len(eligible), downtime, saved, efficiency, len(unresolved)),
-        decisions=list(decisions.values())
+        decisions=list(decisions.values()),
+        deferred_requests=[d for d in decisions.values() if d.final_status == "Deferred"],
+        manual_review_requests=[d for d in decisions.values() if d.final_status == "Manual Review"],
+        isolated_emergency_requests=[d for d in decisions.values() if d.final_status == "Isolated-Emergency"]
     )

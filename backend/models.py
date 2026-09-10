@@ -284,6 +284,9 @@ class SchedulePlan(BaseModel):
     bundling_efficiency_percentage: float = 0.0
     summary_explanation: str
     decisions: List[RequestDecision] = Field(default_factory=list)
+    deferred_requests: List[RequestDecision] = Field(default_factory=list)
+    manual_review_requests: List[RequestDecision] = Field(default_factory=list)
+    isolated_emergency_requests: List[RequestDecision] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(APP_TIMEZONE))
     status: PlanStatusEnum = PlanStatusEnum.GENERATED
     approved_by: Optional[str] = None

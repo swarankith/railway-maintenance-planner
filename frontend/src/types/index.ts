@@ -138,8 +138,9 @@ export interface SchedulePlan {
   bundling_efficiency_percentage: number;
   summary_explanation: string;
   decisions?: RequestDecision[];
-  deferred_requests?: MaintenanceRequest[];
-  manual_review_requests?: MaintenanceRequest[];
+  deferred_requests?: RequestDecision[];
+  manual_review_requests?: RequestDecision[];
+  isolated_emergency_requests?: RequestDecision[];
   created_at: string;
   status: PlanStatus;
   approved_by?: string;

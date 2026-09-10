@@ -141,9 +141,23 @@ def requests_pairwise_compatible(r1: MaintenanceRequest, r2: MaintenanceRequest)
 
 def is_rule_c_clash(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
     """
-    Rule C: same normalized work_type AND same normalized asset
-    (lowercase, strip whitespace/punctuation, EXACT match) AND overlapping corridor+time+KM.
+    Rule C: Same-asset hard clash using fuzzy matching.
+    Work type comparison: fuzzy similarity score >= 85.0.
+    Asset comparison: identical, substring containment, or fuzzy similarity score >= 85.0.
+    Both conditions must hold. If either work type or asset is missing, no clash is reported.
+    Also requires physical overlap: same normalized corridor, overlapping (buffered) time, overlapping KM.
     """
+    if not r1.work_type or not r2.work_type or not r1.asset or not r2.asset:
+        return False
+
+    w1 = normalize_string_exact(r1.work_type)
+    w2 = normalize_string_exact(r2.work_type)
+    a1 = normalize_string_exact(r1.asset)
+    a2 = normalize_string_exact(r2.asset)
+
+    if not w1 or not w2 or not a1 or not a2:
+        return False
+
     if r1.corridor.strip().upper() != r2.corridor.strip().upper():
         return False
     if not buffered_intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end):
@@ -151,11 +165,12 @@ def is_rule_c_clash(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
     if not km_ranges_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end):
         return False
 
-    w1 = normalize_string_exact(r1.work_type)
-    w2 = normalize_string_exact(r2.work_type)
-    a1 = normalize_string_exact(r1.asset)
-    a2 = normalize_string_exact(r2.asset)
-    return (w1 == w2) and (a1 == a2)
+    work_score = fuzz.token_sort_ratio(w1, w2)
+    work_match = work_score >= 85.0
+
+    asset_match = (a1 == a2) or (a1 in a2) or (a2 in a1) or (fuzz.token_sort_ratio(a1, a2) >= 85.0)
+
+    return work_match and asset_match
 
 
 def has_resource_conflict(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
@@ -425,6 +440,28 @@ def solve_maintenance_schedule(
             train_window_checked=False
         )
 
+        # Construct visible emergency schedule block (distinguishable EMG-BLK id)
+        em_start = em.earliest_start
+        em_end = em.earliest_start + timedelta(minutes=em.duration_minutes)
+        em_block = MaintenanceBlock(
+            block_id=f"EMG-BLK-{uuid.uuid4().hex[:6].upper()}",
+            corridor=em.corridor,
+            scheduled_start=em_start,
+            scheduled_end=em_end,
+            duration_minutes=em.duration_minutes,
+            km_start=min(em.km_start, em.km_end),
+            km_end=max(em.km_start, em.km_end),
+            request_ids=[em.request_id],
+            departments=[em.department],
+            resources_allocated=list(dict.fromkeys(x for x in em.required_resources if x)),
+            isolation_applied="Emergency Track & Power Isolation",
+            utilization_score=100.0,
+            time_saved_minutes=0,
+            bundling_explanation=f"EMERGENCY ISOLATION: {reason}",
+            requests=[em]
+        )
+        blocks.append(em_block)
+
         # Buffered reservation to BLOCK non-emergencies: [isolated_at - 15min, latest_end + 15min]
         res_start = (em.earliest_start if em.earliest_start < now_ist else now_ist) - TIME_BUFFER
         res_end = em.latest_end + TIME_BUFFER
@@ -451,16 +488,16 @@ def solve_maintenance_schedule(
     for r in non_emergencies:
         cat, canonical_match, score = classify_work_type(r.work_type)
 
-        # Unknown work type -> Manual Review, disconnection_required = None
+        # Unknown work type -> Manual Review, disconnection_required = True (track-touching safety precaution)
         if cat is None:
             decisions[r.request_id] = RequestDecision(
                 request_id=r.request_id,
                 application_id=r.application_id,
                 final_status="Manual Review",
-                disconnection_required=None,
+                disconnection_required=True,
                 priority=r.priority,
                 retry_count=r.retry_count,
-                reason=f"Manual Review: Unknown work type '{r.work_type}' (similarity score: {score:.1f}%). Requires manual safety classification.",
+                reason=f"Manual Review: Unrecognised work type '{r.work_type}' (similarity score: {score:.1f}%). Safety classification required.",
                 train_window_checked=False
             )
             continue
@@ -472,25 +509,42 @@ def solve_maintenance_schedule(
                 for o in non_emergencies if o.request_id != r.request_id
             )
 
-            # Condition (b): no overlap (buffered) with any emergency reservation from Step 1
-            em_clash = False
-            for slot in reserved_slots:
-                if slot.get("is_emergency") and slot["corridor"].strip().upper() == r.corridor.strip().upper():
-                    if raw_intervals_overlap(r.earliest_start, r.latest_end, slot["buffer_start"], slot["buffer_end"]):
-                        if km_ranges_overlap(r.km_start, r.km_end, slot["km_start"], slot["km_end"]):
-                            em_clash = True
-                            break
-
-            # Condition (c): no overlap with any other Category B request already fast-path-approved in this batch
-            b_overlap = any(
-                o.corridor.strip().upper() == r.corridor.strip().upper() and
-                buffered_intervals_overlap(r.earliest_start, r.latest_end, o.earliest_start, o.latest_end) and
-                km_ranges_overlap(r.km_start, r.km_end, o.km_start, o.km_end)
-                for o in fast_path_approved_cat_b
-            )
-
-            if (not res_clash) and (not em_clash) and (not b_overlap):
+            # Fast path for Category B without resource clash:
+            # Always mark disconnection as not required and train window not checked
+            if not res_clash:
                 fast_path_approved_cat_b.append(r)
+                b_start = r.earliest_start
+                b_end = r.earliest_start + timedelta(minutes=r.duration_minutes)
+                block_b = MaintenanceBlock(
+                    block_id=f"BLK-{uuid.uuid4().hex[:6].upper()}",
+                    corridor=r.corridor,
+                    scheduled_start=b_start,
+                    scheduled_end=b_end,
+                    duration_minutes=r.duration_minutes,
+                    km_start=min(r.km_start, r.km_end),
+                    km_end=max(r.km_start, r.km_end),
+                    request_ids=[r.request_id],
+                    departments=[r.department],
+                    resources_allocated=list(dict.fromkeys(x for x in r.required_resources if x)),
+                    isolation_applied="None (Category B Fast Path)",
+                    utilization_score=100.0,
+                    time_saved_minutes=0,
+                    bundling_explanation="Category B off-track routine work approved on fast path.",
+                    requests=[r]
+                )
+                blocks.append(block_b)
+                reserved_slots.append({
+                    "corridor": r.corridor,
+                    "buffer_start": b_start - TIME_BUFFER,
+                    "buffer_end": b_end + TIME_BUFFER,
+                    "true_start": b_start,
+                    "true_end": b_end,
+                    "km_start": min(r.km_start, r.km_end),
+                    "km_end": max(r.km_start, r.km_end),
+                    "is_emergency": False,
+                    "requests": [r]
+                })
+
                 decisions[r.request_id] = RequestDecision(
                     request_id=r.request_id,
                     application_id=r.application_id,
@@ -498,11 +552,11 @@ def solve_maintenance_schedule(
                     disconnection_required=False,
                     priority=r.priority,
                     retry_count=r.retry_count,
-                    reason="Category B fast path approved (no resource clash, no emergency overlap, no conflicting Cat B).",
+                    reason="Category B fast path approved: no resource clash. Disconnection not required.",
                     train_window_checked=False
                 )
             else:
-                # Any condition fails -> route to Step 3
+                # Resource clash -> route to Step 3
                 step3_candidates.append(r)
         else:
             # Category A -> Step 3
@@ -554,19 +608,19 @@ def solve_maintenance_schedule(
             bundle_id = f"BND-{uuid.uuid4().hex[:6].upper()}" if is_bundled else None
             corridor = unit[0].corridor
 
-            # True tie check: same priority AND same due date AND actual overlap
+            # True tie check: same priority AND same due date AND actual physical overlap
             is_true_tie = False
             for other_unit in bundles:
                 if other_unit != unit:
                     same_prio = min(r.priority for r in unit) == min(r.priority for r in other_unit)
                     same_due = min(r.due_date or r.earliest_start.date() for r in unit) == min(r.due_date or r.earliest_start.date() for r in other_unit)
-                    actual_ov = any(
+                    physical_ov = any(
                         r1.corridor.strip().upper() == r2.corridor.strip().upper() and
-                        buffered_intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end) and
+                        raw_intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end) and
                         km_ranges_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end)
                         for r1 in unit for r2 in other_unit
                     )
-                    if same_prio and same_due and actual_ov:
+                    if same_prio and same_due and physical_ov:
                         is_true_tie = True
                         break
 
@@ -669,7 +723,7 @@ def solve_maintenance_schedule(
                     new_retry = r.retry_count + 1
                     if is_true_tie:
                         final_st = "Manual Review"
-                        fail_reason = "Manual Review: Tied competitors have identical priority and due date."
+                        fail_reason = "Manual Review: Tied competitors have identical priority, due date, and physical conflict."
                     elif has_rule_c:
                         final_st = "Manual Review"
                         fail_reason = "Manual Review: Same-asset hard clash (Rule C) on identical asset and work type."
@@ -725,8 +779,8 @@ def solve_maintenance_schedule(
         f"{deferred_count} deferred, {manual_review_count} manual review."
     )
 
-    unassigned_ids = [d.request_id for d in decisions.values() if d.final_status != "Approved"]
-    infeasibility_reasons = [d.reason for d in decisions.values() if d.final_status != "Approved"]
+    unassigned_ids = [d.request_id for d in decisions.values() if d.final_status in ("Deferred", "Manual Review")]
+    infeasibility_reasons = [d.reason for d in decisions.values() if d.final_status in ("Deferred", "Manual Review")]
 
     plan_name = "Plan A: Maximum Bundling & Line Efficiency" if mode == "recommended" else "Plan B: Rapid Earliest Turnaround"
 
@@ -743,5 +797,8 @@ def solve_maintenance_schedule(
         total_jobs_requested=total_requested,
         bundling_efficiency_percentage=efficiency,
         summary_explanation=summary_text,
-        decisions=list(decisions.values())
+        decisions=list(decisions.values()),
+        deferred_requests=[d for d in decisions.values() if d.final_status == "Deferred"],
+        manual_review_requests=[d for d in decisions.values() if d.final_status == "Manual Review"],
+        isolated_emergency_requests=[d for d in decisions.values() if d.final_status == "Isolated-Emergency"]
     )

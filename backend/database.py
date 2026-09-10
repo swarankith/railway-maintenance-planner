@@ -42,6 +42,12 @@ def init_db():
             train_cols = {row[1] for row in connection.execute(text("PRAGMA table_info(train_movements)"))}
             if "cycle_id" not in train_cols:
                 connection.execute(text("ALTER TABLE train_movements ADD COLUMN cycle_id VARCHAR(64)"))
+            if "train_number" not in train_cols:
+                connection.execute(text("ALTER TABLE train_movements ADD COLUMN train_number VARCHAR(32)"))
+            if "train_name" not in train_cols:
+                connection.execute(text("ALTER TABLE train_movements ADD COLUMN train_name VARCHAR(128)"))
+            if "speed_kmh" not in train_cols:
+                connection.execute(text("ALTER TABLE train_movements ADD COLUMN speed_kmh FLOAT"))
 
             # Check processing_cycles columns
             cycle_cols = {row[1] for row in connection.execute(text("PRAGMA table_info(processing_cycles)"))}
@@ -61,6 +67,29 @@ def init_db():
                 connection.execute(text("ALTER TABLE approval_audits ADD COLUMN cycle_id VARCHAR(64)"))
             if "report_url" not in audit_cols:
                 connection.execute(text("ALTER TABLE approval_audits ADD COLUMN report_url VARCHAR(255)"))
+    elif "postgresql" in DATABASE_URL:
+        with engine.begin() as connection:
+            for stmt in [
+                "ALTER TABLE IF EXISTS maintenance_requests ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE IF EXISTS maintenance_requests ADD COLUMN IF NOT EXISTS application_id VARCHAR(64);",
+                "ALTER TABLE IF EXISTS maintenance_requests ADD COLUMN IF NOT EXISTS document_type VARCHAR(32) NOT NULL DEFAULT 'maintenance';",
+                "ALTER TABLE IF EXISTS maintenance_requests ADD COLUMN IF NOT EXISTS confidence_score FLOAT;",
+                "ALTER TABLE IF EXISTS maintenance_requests ADD COLUMN IF NOT EXISTS cycle_id VARCHAR(64);",
+                "ALTER TABLE IF EXISTS maintenance_requests ADD COLUMN IF NOT EXISTS isolated_at TIMESTAMP WITH TIME ZONE;",
+                "ALTER TABLE IF EXISTS train_movements ADD COLUMN IF NOT EXISTS cycle_id VARCHAR(64);",
+                "ALTER TABLE IF EXISTS train_movements ADD COLUMN IF NOT EXISTS train_number VARCHAR(32);",
+                "ALTER TABLE IF EXISTS train_movements ADD COLUMN IF NOT EXISTS train_name VARCHAR(128);",
+                "ALTER TABLE IF EXISTS train_movements ADD COLUMN IF NOT EXISTS speed_kmh FLOAT;",
+                "ALTER TABLE IF EXISTS processing_cycles ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'Active';",
+                "ALTER TABLE IF EXISTS schedule_plans ADD COLUMN IF NOT EXISTS cycle_id VARCHAR(64);",
+                "ALTER TABLE IF EXISTS approval_audits ADD COLUMN IF NOT EXISTS application_id VARCHAR(64);",
+                "ALTER TABLE IF EXISTS approval_audits ADD COLUMN IF NOT EXISTS cycle_id VARCHAR(64);",
+                "ALTER TABLE IF EXISTS approval_audits ADD COLUMN IF NOT EXISTS report_url VARCHAR(255);"
+            ]:
+                try:
+                    connection.execute(text(stmt))
+                except Exception:
+                    pass
 
 
 def get_db():

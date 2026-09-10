@@ -333,6 +333,14 @@ class BulkDeleteResponse(BaseModel):
     ids: List[str]
     skipped: List[str]
     reason: Optional[str] = None
+    deleted_count: Optional[int] = None
+    skipped_count: Optional[int] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.deleted_count is None:
+            self.deleted_count = self.deleted
+        if self.skipped_count is None:
+            self.skipped_count = len(self.skipped)
 
 
 # ==========================================

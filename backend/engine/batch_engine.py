@@ -86,9 +86,9 @@ def classify_work_type(work_type: str) -> Tuple[Optional[str], Optional[str], fl
         return best_cat, best_match, best_score
 
     # Check common synonyms/abbreviations in Indian Railways parlance
-    if any(k in norm_input for k in ["rail renewal", "rail replacement", "tamping", "welding", "sleeper", "ohe", "catenary", "point machine"]):
+    if any(k in norm_input for k in ["rail renewal", "rail replacement", "tamping", "welding", "sleeper", "ohe", "catenary", "point machine", "grinding", "grind"]):
         return "A", norm_input, 86.0
-    if any(k in norm_input for k in ["vegetation", "cess", "relay room", "gate", "patrolling", "routine inspection"]):
+    if any(k in norm_input for k in ["vegetation", "cess", "relay room", "gate", "patrolling", "routine inspection", "drain", "desilt", "cleaning"]):
         return "B", norm_input, 86.0
 
     return None, None, best_score

@@ -1,16 +1,8 @@
-export type UserRole = 'Planner' | 'Operations' | 'Approver';
+export type Department = 'Engineering' | 'Electrical' | 'S&T' | 'Operations';
 
-export interface User {
-  id: number;
-  username: string;
-  role: UserRole;
-  department: string;
-  created_at?: string;
-}
+export type PriorityLevel = 1 | 2 | 3;
 
-export type Department = 'Engineering' | 'S&T' | 'Electrical' | 'Operations' | 'Other';
-
-export type BlockType = 'Normal' | 'Emergency' | 'Planned';
+export type BlockType = 'Emergency' | 'Normal' | 'Corridor' | 'Rolling';
 
 export type RequestStatus =
   | 'Ingested'
@@ -18,45 +10,52 @@ export type RequestStatus =
   | 'Confirmed'
   | 'Optimized'
   | 'Approved'
-  | 'Rejected'
   | 'Deferred'
   | 'Manual Review'
   | 'Isolated-Emergency';
 
 export type ConflictType =
-  | 'SpatialTimeKM'
-  | 'ResourceOverlap'
-  | 'TrainMovementConflict'
-  | 'DepartmentIncompatibility'
-  | 'SameAssetHardClash';
+  | 'HardPhysicalOverlap'
+  | 'PowerDisconnectionContradiction'
+  | 'ResourceContention'
+  | 'TrainMovementCollision'
+  | 'SpeedRestrictionConflict'
+  | 'StationSignalingInterlock';
 
-export type PlanStatus = 'Generated' | 'Approved' | 'Rejected';
+export type PlanStatus = 'Draft' | 'Approved' | 'Rejected';
+
+export interface User {
+  id: number;
+  username: string;
+  role: 'Chief Controller' | 'Planner' | 'Approver' | 'Operations';
+}
 
 export interface MaintenanceRequest {
-  id?: number;
   request_id: string;
   application_id?: string;
+  cycle_id?: string;
   department: Department;
   corridor: string;
   km_start: number;
   km_end: number;
-  asset: string;
-  work_type: string;
-  priority: number; // 1: Emergency, 2: High Urgent, 3: Normal
-  priority_reason?: string;
-  block_type: BlockType;
-  duration_minutes: number;
   earliest_start: string;
   latest_end: string;
-  due_date?: string;
-  required_resources: string[];
+  duration_minutes: number;
+  work_type: string;
+  asset: string;
+  disconnection_required: boolean | null;
+  priority: PriorityLevel;
+  priority_reason?: string;
+  block_type?: string;
   isolation_requirement?: string;
-  block_shared_allowed: boolean;
+  block_shared_allowed?: boolean;
+  required_resources: string[];
   dependencies: string[];
   status: RequestStatus;
   source_document: string;
   missing_fields: string[];
   validation_notes?: string;
+  confidence_score?: number;
   retry_count?: number;
   created_at?: string;
   updated_at?: string;
@@ -64,6 +63,9 @@ export interface MaintenanceRequest {
 
 export interface TrainMovement {
   train_id: string;
+  train_number?: string;
+  train_name?: string;
+  speed_kmh?: number;
   corridor: string;
   departure_time: string;
   arrival_time: string;
@@ -71,10 +73,12 @@ export interface TrainMovement {
   km_end: number;
   train_type: string;
   source_document?: string;
+  cycle_id?: string;
 }
 
 export interface ConflictDetail {
   conflict_id: string;
+  cycle_id?: string;
   conflict_type: ConflictType;
   severity: 'Hard' | 'Warning' | 'ReviewRequired';
   request_ids: string[];
@@ -111,7 +115,7 @@ export interface RequestDecision {
   request_id: string;
   application_id?: string;
   final_status: string;
-  disconnection_required: boolean;
+  disconnection_required: boolean | null;
   priority: number;
   bundle_id?: string;
   bundle_members: string[];
@@ -122,6 +126,7 @@ export interface RequestDecision {
 
 export interface SchedulePlan {
   schedule_id: string;
+  cycle_id?: string;
   plan_name: string;
   is_recommended: boolean;
   blocks: MaintenanceBlock[];
@@ -133,6 +138,8 @@ export interface SchedulePlan {
   bundling_efficiency_percentage: number;
   summary_explanation: string;
   decisions?: RequestDecision[];
+  deferred_requests?: MaintenanceRequest[];
+  manual_review_requests?: MaintenanceRequest[];
   created_at: string;
   status: PlanStatus;
   approved_by?: string;
@@ -157,26 +164,38 @@ export interface ApprovalAudit {
   id: number;
   schedule_id: string;
   application_id?: string;
-  action: 'APPROVED' | 'REJECTED';
+  cycle_id?: string;
+  action: 'APPROVED' | 'REJECTED' | 'DELETED';
   role: string;
   user_name: string;
   notes?: string;
   timestamp: string;
+  report_url?: string;
 }
 
 export interface ApprovalHistoryItem {
   id: number;
   schedule_id: string;
   application_id: string;
-  action: 'APPROVED' | 'REJECTED';
+  cycle_id?: string;
+  action: 'APPROVED' | 'REJECTED' | 'DELETED';
   role: string;
   user_name: string;
   notes?: string;
   timestamp: string;
+  report_url?: string;
   request_ids: string[];
   corridors: string[];
   total_blocks: number;
   total_jobs: number;
+}
+
+export interface BulkDeleteResponse {
+  deleted_count: number;
+  skipped_count: number;
+  deleted_ids: string[];
+  skipped_ids: string[];
+  reason?: string;
 }
 
 export type ActiveTab = 'ingest' | 'requests' | 'conflicts' | 'gantt' | 'approval' | 'history';

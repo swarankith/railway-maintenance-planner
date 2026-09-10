@@ -7,11 +7,9 @@ import {
   CheckCircle2,
   FileText,
   Clock,
-  LogOut,
-  UserCheck,
   History,
 } from 'lucide-react';
-import { ActiveTab, User } from '../types';
+import { ActiveTab } from '../types';
 
 interface NavbarProps {
   activeTab: ActiveTab;
@@ -20,8 +18,6 @@ interface NavbarProps {
   conflictsCount: number;
   needsReviewCount: number;
   hasSchedule: boolean;
-  currentUser: User | null;
-  onLogout: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -31,8 +27,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   conflictsCount,
   needsReviewCount,
   hasSchedule,
-  currentUser,
-  onLogout,
 }) => {
   return (
     <header className="bg-gradient-to-r from-saffron-500 via-saffron-600 to-amber-600 text-white shadow-xl sticky top-0 z-40">
@@ -49,7 +43,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   RailBlock AI
                 </span>
                 <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-navy-900/40 text-white border border-white/30 backdrop-blur-sm">
-                  Phase 2.0
+                  Phase 2.0 Final
                 </span>
               </div>
               <p className="text-[11px] sm:text-xs font-semibold text-white/90 tracking-wide hidden sm:block">
@@ -58,33 +52,11 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Right Status & User Badges */}
-          <div className="flex items-center gap-2 sm:gap-3">
-            {/* User Profile Badge */}
-            {currentUser && (
-              <div className="flex items-center gap-2 bg-navy-950/80 px-3 py-1.5 rounded-xl border border-white/20 shadow-sm backdrop-blur-md">
-                <UserCheck className="w-4 h-4 text-saffron-400" />
-                <div className="text-left">
-                  <div className="text-xs font-bold text-white leading-tight">
-                    {currentUser.username}
-                  </div>
-                  <div className="text-[9px] font-semibold text-saffron-300 uppercase tracking-wider">
-                    {currentUser.role}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Logout Button */}
-            {currentUser && (
-              <button
-                onClick={onLogout}
-                title="Sign Out"
-                className="p-2 bg-white/20 hover:bg-white/30 text-white rounded-xl transition-all border border-white/20"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
-            )}
+          {/* Subtitle / Status indicator */}
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-navy-900/60 text-white border border-white/20 backdrop-blur-sm">
+              Deterministic Engine Ready
+            </span>
           </div>
         </div>
 

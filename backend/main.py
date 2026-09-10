@@ -1,7 +1,8 @@
 """
-FastAPI Main Application Entrypoint (Phase 2).
+FastAPI Main Application Entrypoint (Phase 2 Final v6).
 Initializes database tables, registers all API routes, runs background emergency escalation audits,
 and serves the React frontend build if present.
+Authentication removed per Part C.
 """
 import os
 import asyncio
@@ -15,87 +16,16 @@ from contextlib import asynccontextmanager
 from backend.config import APP_TIMEZONE, EMERGENCY_ESCALATION_MINUTES
 from backend.database import init_db, SessionLocal
 from backend.models import DBMaintenanceRequest, DBEscalationEvent, RequestStatusEnum
-from backend.routes import auth, ingest, requests, conflicts, schedules, health, export, approvals, escalations
-from backend.services.escalation import escalation_worker  # background worker
-
-
-async def run_emergency_escalation_audit():
-    """
-    Background job: checks for isolated emergencies not signed off within the allowed time.
-    Creates persisted EscalationEvents.
-    """
-    while True:
-        try:
-            await asyncio.sleep(300)  # Check every 5 minutes
-            db = SessionLocal()
-            try:
-                now_ist = datetime.now(APP_TIMEZONE)
-                cutoff = now_ist - timedelta(minutes=EMERGENCY_ESCALATION_MINUTES)
-                unresolved = db.query(DBMaintenanceRequest).filter(
-                    DBMaintenanceRequest.status.in_([
-                        RequestStatusEnum.ISOLATED_EMERGENCY.value,
-                        "Isolated-Emergency"
-                    ]),
-                    DBMaintenanceRequest.isolated_at != None,
-                    DBMaintenanceRequest.isolated_at <= cutoff
-                ).all()
-
-                for req in unresolved:
-                    existing_esc = db.query(DBEscalationEvent).filter(
-                        DBEscalationEvent.request_id == req.request_id,
-                        DBEscalationEvent.status == "Pending"
-                    ).first()
-
-                    if not existing_esc:
-                        esc = DBEscalationEvent(
-                            event_id=f"ESC-{datetime.now().strftime('%Y%m%d%H%M%S')}-{req.request_id[:6]}",
-                            request_id=req.request_id,
-                            corridor=req.corridor,
-                            reason=f"Emergency request {req.request_id} has exceeded the {EMERGENCY_ESCALATION_MINUTES}-minute human sign-off timeout."
-                        )
-                        db.add(esc)
-                db.commit()
-            finally:
-                db.close()
-        except Exception:
-            # Add logging in production; for prototype, silent catch is acceptable
-            pass
+from backend.routes import ingest, requests, conflicts, schedules, health, export, approvals, escalations, trains, demo
+from backend.services.escalation import escalation_worker
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
 
-    # Create default users if none exist (necessary for login)
-    from backend.database import SessionLocal
-    from backend.models import DBUser
-    from backend.auth import hash_password
-    db = SessionLocal()
-    try:
-        if db.query(DBUser).count() == 0:
-            users = [
-                ("planner1", "planner123", "Planner"),
-                ("ops1", "ops123", "Operations"),
-                ("approver1", "approver123", "Approver"),
-            ]
-            for username, password, role in users:
-                db.add(DBUser(
-                    username=username,
-                    password_hash=hash_password(password),
-                    role=role,
-                    department="Engineering"
-                ))
-            db.commit()
-            print("✅ Default users created successfully.")
-        else:
-            print("ℹ️ Users already exist, skipping creation.")
-    finally:
-        db.close()
-
-    # Start the emergency escalation background worker
+    # Start emergency escalation background worker
     escalation_task = asyncio.create_task(escalation_worker())
-    # Optionally start the audit worker here, but we already have escalation_worker
-    # You can choose one; we'll keep the service worker
 
     yield
 
@@ -125,14 +55,15 @@ app.add_middleware(
 
 # Register API Routers
 app.include_router(health.router)
-app.include_router(auth.router)
 app.include_router(export.router)
 app.include_router(approvals.router)
 app.include_router(ingest.router)
 app.include_router(requests.router)
 app.include_router(conflicts.router)
 app.include_router(schedules.router)
-app.include_router(escalations.router)          # <-- NEW
+app.include_router(escalations.router)
+app.include_router(trains.router)
+app.include_router(demo.router)
 
 # Mount production frontend build if present
 frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))

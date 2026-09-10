@@ -1,28 +1,33 @@
 """
-Requests CRUD API:
+Requests CRUD & Bulk Operations API (Phase 2 Final v6):
+- Open API (Authentication removed per Part C)
 - GET /api/v1/requests
 - POST /api/v1/requests
 - PUT /api/v1/requests/{request_id}
 - POST /api/v1/requests/{request_id}/confirm
 - DELETE /api/v1/requests/{request_id}
-Protected by JWT Authentication.
+- POST /api/v1/requests/bulk-delete (Part H Guard)
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 
+from backend.config import APP_TIMEZONE
 from backend.database import get_db
 from backend.models import (
     MaintenanceRequest,
     MaintenanceRequestCreate,
     MaintenanceRequestUpdate,
     DBMaintenanceRequest,
-    DBUser,
+    DBProcessingCycle,
+    DBApprovalAudit,
     RequestStatusEnum,
+    CycleStatusEnum,
+    BulkDeleteRequest,
+    BulkDeleteResponse,
     generate_application_id,
 )
-from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api/v1/requests", tags=["Requests"])
 
@@ -32,6 +37,8 @@ def db_to_pydantic(db_req: DBMaintenanceRequest) -> MaintenanceRequest:
         id=db_req.id,
         request_id=db_req.request_id,
         application_id=db_req.application_id or "APP-LEGACY",
+        cycle_id=db_req.cycle_id,
+        document_type=db_req.document_type or "maintenance",
         department=db_req.department,
         corridor=db_req.corridor,
         km_start=db_req.km_start,
@@ -53,6 +60,7 @@ def db_to_pydantic(db_req: DBMaintenanceRequest) -> MaintenanceRequest:
         source_document=db_req.source_document,
         missing_fields=db_req.missing_fields or [],
         validation_notes=db_req.validation_notes,
+        confidence_score=db_req.confidence_score,
         retry_count=db_req.retry_count or 0,
         created_at=db_req.created_at,
         updated_at=db_req.updated_at
@@ -66,10 +74,9 @@ def list_requests(
     status: Optional[str] = None,
     priority: Optional[int] = None,
     application_id: Optional[str] = None,
-    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List and filter maintenance requests."""
+    """List and filter maintenance requests (no auth)."""
     query = db.query(DBMaintenanceRequest)
     if corridor:
         query = query.filter(DBMaintenanceRequest.corridor.ilike(f"%{corridor}%"))
@@ -89,7 +96,6 @@ def list_requests(
 @router.post("", response_model=MaintenanceRequest)
 def create_request(
     payload: MaintenanceRequestCreate,
-    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Manually create a new maintenance request or add a custom job."""
@@ -104,6 +110,8 @@ def create_request(
     db_req = DBMaintenanceRequest(
         request_id=req_id,
         application_id=app_id,
+        cycle_id=payload.cycle_id,
+        document_type=payload.document_type or "maintenance",
         department=str(payload.department),
         corridor=payload.corridor.strip().upper(),
         km_start=payload.km_start,
@@ -124,6 +132,7 @@ def create_request(
         status=payload.status.value,
         source_document=payload.source_document,
         missing_fields=[],
+        confidence_score=payload.confidence_score or 1.0,
         validation_notes="Manually verified and confirmed"
     )
     db.add(db_req)
@@ -136,7 +145,6 @@ def create_request(
 def update_request(
     request_id: str,
     payload: MaintenanceRequestUpdate,
-    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Edit/complete an existing request (especially flagged Needs-Review records)."""
@@ -160,7 +168,6 @@ def update_request(
             else:
                 setattr(db_req, field, val)
 
-    # Re-evaluate missing fields
     missing = []
     if not db_req.corridor or db_req.corridor == "UNSPECIFIED-CORRIDOR":
         missing.append("corridor")
@@ -186,11 +193,7 @@ def update_request(
 
 
 @router.post("/{request_id}/confirm", response_model=MaintenanceRequest)
-def confirm_request(
-    request_id: str,
-    current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+def confirm_request(request_id: str, db: Session = Depends(get_db)):
     """Manually confirms a request to Confirmed state."""
     db_req = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == request_id).first()
     if not db_req:
@@ -198,33 +201,93 @@ def confirm_request(
 
     db_req.status = RequestStatusEnum.CONFIRMED.value
     db_req.missing_fields = []
-    db_req.validation_notes = f"Manually confirmed by {current_user.username}"
+    db_req.validation_notes = "Manually confirmed by planner"
     db.commit()
     db.refresh(db_req)
     return db_to_pydantic(db_req)
 
 
 @router.delete("/{request_id}")
-def delete_request(
-    request_id: str,
-    current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+def delete_request(request_id: str, db: Session = Depends(get_db)):
     """Delete a single request."""
     db_req = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == request_id).first()
     if not db_req:
         raise HTTPException(status_code=404, detail=f"Request '{request_id}' not found.")
+
+    # Check Part H guard: blocked if cycle is Active
+    if db_req.cycle_id:
+        active_cycle = db.query(DBProcessingCycle).filter(
+            DBProcessingCycle.cycle_id == db_req.cycle_id,
+            DBProcessingCycle.status == CycleStatusEnum.ACTIVE.value
+        ).first()
+        if active_cycle:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete request {request_id}: It is part of an active processing cycle ({db_req.cycle_id})."
+            )
+
     db.delete(db_req)
     db.commit()
     return {"message": f"Request {request_id} deleted successfully."}
 
 
+@router.post("/bulk-delete", response_model=BulkDeleteResponse)
+def bulk_delete_requests(payload: BulkDeleteRequest, db: Session = Depends(get_db)):
+    """
+    Part H: Bulk Delete API.
+    - Guard: deletion is blocked only for requests whose cycle_id references a ProcessingCycle with status = 'Active'.
+    - Brand-new (cycle_id IS NULL) and closed-cycle Confirmed/Deferred/Manual Review requests ARE deletable.
+    - Blocked items skipped, not errored.
+    - Permanent delete. Log in DBApprovalAudit: action="DELETED".
+    """
+    if not payload.request_ids:
+        return BulkDeleteResponse(deleted=0, ids=[], skipped=[], reason=None)
+
+    # Find active cycle IDs
+    active_cycles = db.query(DBProcessingCycle.cycle_id).filter(
+        DBProcessingCycle.status == CycleStatusEnum.ACTIVE.value
+    ).all()
+    active_cycle_ids = {c[0] for c in active_cycles}
+
+    records = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id.in_(payload.request_ids)).all()
+
+    deleted_ids = []
+    skipped_ids = []
+    now_ist = datetime.now(APP_TIMEZONE)
+
+    for r in records:
+        if r.cycle_id and r.cycle_id in active_cycle_ids:
+            skipped_ids.append(r.request_id)
+        else:
+            deleted_ids.append(r.request_id)
+            # Log audit
+            audit = DBApprovalAudit(
+                schedule_id=r.request_id,
+                application_id=r.application_id,
+                cycle_id=r.cycle_id,
+                action="DELETED",
+                role="N/A",
+                user_name="N/A",
+                notes="Bulk delete via Requests Pool",
+                timestamp=now_ist
+            )
+            db.add(audit)
+            db.delete(r)
+
+    db.commit()
+
+    reason = "Request is part of an active processing cycle" if skipped_ids else None
+    return BulkDeleteResponse(
+        deleted=len(deleted_ids),
+        ids=deleted_ids,
+        skipped=skipped_ids,
+        reason=reason
+    )
+
+
 @router.delete("")
-def clear_all_requests(
-    current_user: DBUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Deletes all maintenance requests and train movements for clean state testing."""
+def clear_all_requests(db: Session = Depends(get_db)):
+    """Deletes all maintenance requests and train movements for clean testing."""
     db.query(DBMaintenanceRequest).delete()
     db.commit()
     return {"message": "All maintenance requests cleared."}

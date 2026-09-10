@@ -10,9 +10,11 @@ import {
   AlertTriangle,
   Send,
   Sparkles,
+  Download,
+  FileText,
 } from 'lucide-react';
 import { SchedulePlan, ApprovalAudit, ActiveTab } from '../types';
-import { approveSchedule, rejectSchedule, fetchAudits } from '../services/api';
+import { approveSchedule, rejectSchedule, fetchAudits, downloadApprovalReport } from '../services/api';
 
 interface ApprovalHubProps {
   schedulePlan: SchedulePlan | null;
@@ -34,6 +36,7 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
   const [showRejectModal, setShowRejectModal] = useState<boolean>(false);
   const [audits, setAudits] = useState<ApprovalAudit[]>([]);
   const [submitting, setSubmitting] = useState<boolean>(false);
+  const [downloadingPdf, setDownloadingPdf] = useState<boolean>(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
@@ -51,6 +54,18 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
     }
   };
 
+  const handleDownloadPdf = async () => {
+    if (!schedulePlan) return;
+    setDownloadingPdf(true);
+    try {
+      await downloadApprovalReport(schedulePlan.schedule_id);
+    } catch (err: any) {
+      alert(err.message || 'Failed to download approval report PDF');
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
   const handleApprove = async () => {
     if (!schedulePlan) return;
     setSubmitting(true);
@@ -63,7 +78,17 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
       });
       onPlanStatusChange(updated);
       await loadAudits(schedulePlan.schedule_id);
-      setMessage({ type: 'success', text: `Schedule ${schedulePlan.schedule_id} approved successfully by ${userName} (${role}).` });
+      setMessage({
+        type: 'success',
+        text: `Schedule ${schedulePlan.schedule_id} approved successfully by ${userName} (${role}). Downloading official report...`,
+      });
+
+      // Auto download Part F PDF report
+      try {
+        await downloadApprovalReport(schedulePlan.schedule_id);
+      } catch {
+        // Fallback: user can click manual download
+      }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to approve plan' });
     } finally {
@@ -88,7 +113,10 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
       onPlanStatusChange(updated);
       await loadAudits(schedulePlan.schedule_id);
       setShowRejectModal(false);
-      setMessage({ type: 'success', text: `Schedule ${schedulePlan.schedule_id} rejected and returned for revision.` });
+      setMessage({
+        type: 'success',
+        text: `Schedule ${schedulePlan.schedule_id} rejected and returned for revision.`,
+      });
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to reject plan' });
     } finally {
@@ -102,7 +130,7 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
         <ShieldCheck className="w-14 h-14 text-slate-400 mx-auto mb-4" />
         <h3 className="text-base font-bold text-slate-800">No Active Schedule Plan for Approval</h3>
         <p className="text-xs text-slate-500 max-w-md mx-auto mt-2">
-          Generate an optimized schedule plan first to perform human planner review and approval.
+          Generate an optimized schedule plan first to perform human controller review and release.
         </p>
         <button
           onClick={() => setActiveTab('requests')}
@@ -141,20 +169,32 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                Human-in-the-Loop Governance: The AI engine recommends; an authorized railway controller reviews and approves.
+                Human-in-the-Loop Decision Support: Review, authorize, and download two-section Part F sign-off PDF.
               </p>
             </div>
           </div>
         </div>
 
-        {schedulePlan.approved_by && (
-          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800">
-            <div className="font-bold">Signed by: {schedulePlan.approved_by}</div>
-            <div className="text-[10px] text-emerald-700">
-              Role: {schedulePlan.approval_role} | {schedulePlan.approval_timestamp ? new Date(schedulePlan.approval_timestamp).toLocaleString() : ''}
+        <div className="flex items-center gap-3">
+          {/* Download Official Report PDF Button */}
+          <button
+            onClick={handleDownloadPdf}
+            disabled={downloadingPdf}
+            className="px-4 py-2.5 bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold rounded-xl shadow-sm flex items-center gap-2 transition disabled:opacity-50"
+          >
+            <Download className="w-4 h-4" />
+            <span>{downloadingPdf ? 'Generating PDF...' : 'Download Approval Report (PDF)'}</span>
+          </button>
+
+          {schedulePlan.approved_by && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800">
+              <div className="font-bold">Signed by: {schedulePlan.approved_by}</div>
+              <div className="text-[10px] text-emerald-700">
+                Role: {schedulePlan.approval_role} | {schedulePlan.approval_timestamp ? new Date(schedulePlan.approval_timestamp).toLocaleString() : ''}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {message && (

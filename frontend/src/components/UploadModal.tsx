@@ -14,6 +14,9 @@ import {
   MapPin,
   RefreshCw,
   Tag,
+  Play,
+  Database,
+  Layers,
 } from 'lucide-react';
 import { MaintenanceRequest, IngestResponse, TrainMovement, ActiveTab } from '../types';
 import { ingestDocument, confirmRequest, deleteRequest } from '../services/api';
@@ -23,15 +26,25 @@ interface UploadModalProps {
   onEditRequest: (req: MaintenanceRequest) => void;
   setActiveTab: (tab: ActiveTab) => void;
   requests: MaintenanceRequest[];
+  trains: TrainMovement[];
+  onTriggerOptimization: () => void;
+  isOptimizing: boolean;
+  onLoadDemo: () => Promise<void>;
+  isDemoLoading: boolean;
 }
 
-type UploadType = 'request' | 'train_movement' | 'corridor_availability';
+type UploadType = 'request' | 'train_movement';
 
 export const UploadModal: React.FC<UploadModalProps> = ({
   onIngestSuccess,
   onEditRequest,
   setActiveTab,
   requests,
+  trains,
+  onTriggerOptimization,
+  isOptimizing,
+  onLoadDemo,
+  isDemoLoading,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -40,11 +53,21 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [uploadType, setUploadType] = useState<UploadType>('request');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const eligibleRequests = requests.filter(
+    (r) =>
+      ['Confirmed', 'Needs-Review', 'Deferred', 'Manual Review'].includes(r.status) &&
+      !r.cycle_id
+  );
+  const eligibleTrains = trains.filter((t) => !t.cycle_id);
+
+  const hasRequests = eligibleRequests.length > 0;
+  const hasTrains = eligibleTrains.length > 0;
+
   const handleFileUpload = async (file: File) => {
     if (!file) return;
     const ext = file.name.split('.').pop()?.toLowerCase();
-    if (!['pdf', 'docx', 'doc', 'txt'].includes(ext || '')) {
-      setError('Please upload a valid PDF or DOCX document.');
+    if (!['pdf', 'docx', 'doc', 'txt', 'csv'].includes(ext || '')) {
+      setError('Please upload a valid PDF, DOCX, or CSV document.');
       return;
     }
 
@@ -103,37 +126,94 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Action Header with Demo & Optimize */}
+      <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-black text-navy-950 flex items-center gap-2">
+            <UploadCloud className="w-6 h-6 text-saffron-600" />
+            <span>Document Ingestion & Multi-Source Gating</span>
+          </h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Phase 2 requires both active Maintenance Requests and Scheduled Train Movements before optimization.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Demo Button */}
+          <button
+            onClick={onLoadDemo}
+            disabled={isDemoLoading}
+            className="px-4 py-2.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-xs font-bold shadow-sm flex items-center gap-2 transition disabled:opacity-50"
+            title="Run instant in-memory simulation with standard test fixtures"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>{isDemoLoading ? 'Loading Demo...' : 'Load Demo (in-memory, not saved)'}</span>
+          </button>
+
+          {/* Optimize Button with Gating */}
+          <button
+            onClick={onTriggerOptimization}
+            disabled={isOptimizing || !hasRequests || !hasTrains}
+            className="px-4 py-2.5 rounded-xl bg-saffron-500 hover:bg-saffron-600 text-navy-950 text-xs font-black shadow-md flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Play className="w-4 h-4 fill-navy-950" />
+            <span>{isOptimizing ? 'Optimizing...' : 'Run Deterministic Engine'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Gating Status Banners */}
+      {(!hasRequests || !hasTrains) && (
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl space-y-2 text-xs text-amber-900">
+          <div className="flex items-center gap-2 font-bold">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Engine Eligibility Gating Warning:</span>
+          </div>
+          <ul className="list-disc list-inside space-y-1 pl-1 text-amber-800">
+            {!hasRequests && (
+              <li>
+                <strong>Maintenance Requests missing:</strong> Maintenance request PDF not uploaded. Upload it first (Tab: Maintenance Requests).
+              </li>
+            )}
+            {!hasTrains && (
+              <li>
+                <strong>Train Movements missing:</strong> Train movement PDF not uploaded. Upload it first (Tab: Train Movements).
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+
       {/* Upload Type Tabs */}
-      <div className="flex gap-2 mb-4 flex-wrap">
+      <div className="flex gap-2 mb-2 flex-wrap items-center">
         <button
           onClick={() => setUploadType('request')}
-          className={`px-4 py-2 rounded-xl text-sm font-bold transition ${
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
             uploadType === 'request'
-              ? 'bg-blue-800 text-white shadow-md'
-              : 'bg-white text-blue-800 border border-blue-300 hover:bg-blue-50'
+              ? 'bg-navy-900 text-white shadow-md'
+              : 'bg-white text-navy-800 border border-slate-200 hover:bg-slate-50'
           }`}
         >
-          Maintenance Requests
+          <FileText className="w-3.5 h-3.5" />
+          <span>Maintenance Requests</span>
+          <span className="px-2 py-0.5 rounded-full text-[10px] bg-white/20 font-mono">
+            {eligibleRequests.length} eligible
+          </span>
         </button>
+
         <button
           onClick={() => setUploadType('train_movement')}
-          className={`px-4 py-2 rounded-xl text-sm font-bold transition ${
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
             uploadType === 'train_movement'
-              ? 'bg-blue-800 text-white shadow-md'
-              : 'bg-white text-blue-800 border border-blue-300 hover:bg-blue-50'
+              ? 'bg-navy-900 text-white shadow-md'
+              : 'bg-white text-navy-800 border border-slate-200 hover:bg-slate-50'
           }`}
         >
-          Train Movements
-        </button>
-        <button
-          onClick={() => setUploadType('corridor_availability')}
-          className={`px-4 py-2 rounded-xl text-sm font-bold transition ${
-            uploadType === 'corridor_availability'
-              ? 'bg-blue-800 text-white shadow-md'
-              : 'bg-white text-blue-800 border border-blue-300 hover:bg-blue-50'
-          }`}
-        >
-          Corridor Availability
+          <Train className="w-3.5 h-3.5" />
+          <span>Train Movements</span>
+          <span className="px-2 py-0.5 rounded-full text-[10px] bg-white/20 font-mono">
+            {eligibleTrains.length} eligible
+          </span>
         </button>
       </div>
 
@@ -157,7 +237,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               handleFileUpload(e.target.files[0]);
             }
           }}
-          accept=".pdf,.docx,.doc,.txt"
+          accept=".pdf,.docx,.doc,.txt,.csv"
           className="hidden"
         />
 
@@ -173,31 +253,22 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           <div>
             <h3 className="text-base sm:text-lg font-black text-navy-950">
               {uploading
-                ? 'Parsing & Normalizing...'
+                ? 'Parsing & Normalizing Document...'
                 : uploadType === 'train_movement'
-                  ? 'Upload Scheduled Train Movement Documents'
-                  : uploadType === 'corridor_availability'
-                    ? 'Upload Corridor Availability Windows'
-                    : 'Upload Maintenance Work Request Documents'}
+                ? 'Upload Scheduled Train Movement Schedule'
+                : 'Upload Maintenance Work Request Circular'}
             </h3>
             <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-md mx-auto">
               {uploadType === 'train_movement'
-                ? 'Drag & drop PDF/DOCX files containing train schedules.'
-                : uploadType === 'corridor_availability'
-                  ? 'Drag & drop PDF/DOCX files containing corridor availability windows.'
-                  : 'Drag & drop any PDF or DOCX circular (Engineering, S&T, Electrical work schedules, tables, or plain prose memos).'}
+                ? 'Drag & drop PDF/CSV containing train numbers, corridors, and scheduled departure/arrival times.'
+                : 'Drag & drop any PDF or DOCX circular (Engineering, S&T, Electrical work schedules, tables, or memos).'}
             </p>
           </div>
 
           <div className="flex items-center gap-3 text-xs text-slate-500 pt-2 font-semibold">
-            <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">PDF Tables & Forms</span>
-            <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">DOCX Circulars</span>
-            {uploadType === 'train_movement' && (
-              <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">Train Schedules</span>
-            )}
-            {uploadType === 'corridor_availability' && (
-              <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">Availability Windows</span>
-            )}
+            <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">PDF Circulars & Tables</span>
+            <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">DOCX Schedules</span>
+            <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200">IST Auto-Normalization</span>
           </div>
         </div>
       </div>
@@ -391,7 +462,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           <FileText className="w-12 h-12 text-slate-400 mx-auto mb-3" />
           <h4 className="text-sm font-bold text-slate-800">No records in database</h4>
           <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-            Starts with an empty database. Upload a PDF or DOCX document above to begin ingestion.
+            Starts with an empty database. Upload documents above or click &quot;Load Demo&quot; to test the deterministic engine.
           </p>
         </div>
       )}

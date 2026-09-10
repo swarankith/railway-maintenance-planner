@@ -2,7 +2,7 @@
 Export API Endpoints:
 - GET /api/v1/export/requests (Excel & PDF)
 - GET /api/v1/export/approvals (Excel & PDF)
-Generates government-grade formatted Excel and PDF reports.
+Generates formatted Excel (.xlsx) and PDF reports (no auth per Part C).
 """
 import io
 from datetime import datetime
@@ -19,8 +19,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from backend.config import APP_TIMEZONE
 from backend.database import get_db
-from backend.models import DBMaintenanceRequest, DBApprovalAudit, DBUser
-from backend.auth import get_current_user
+from backend.models import DBMaintenanceRequest, DBApprovalAudit
 
 router = APIRouter(prefix="/api/v1/export", tags=["Exports"])
 
@@ -36,11 +35,10 @@ def export_requests(
     corridor: Optional[str] = None,
     department: Optional[str] = None,
     status: Optional[str] = None,
-    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Exports all maintenance requests with application IDs, status, priorities, and reasons to Excel or PDF.
+    Exports maintenance requests to Excel (.xlsx) or PDF.
     """
     query = db.query(DBMaintenanceRequest)
     if corridor:
@@ -51,7 +49,6 @@ def export_requests(
         query = query.filter(DBMaintenanceRequest.status == status)
 
     records = query.order_by(DBMaintenanceRequest.priority.asc(), DBMaintenanceRequest.earliest_start.asc()).all()
-
     filename = get_timestamp_filename("requests_status", "xlsx" if format in ("excel", "xlsx") else "pdf")
 
     if format in ("excel", "xlsx"):
@@ -59,7 +56,6 @@ def export_requests(
         ws = wb.active
         ws.title = "Maintenance Requests"
 
-        # Headers
         headers = [
             "Application ID", "Request ID", "Department", "Corridor", "Work Type",
             "Priority", "Block Type", "Start (IST)", "End (IST)", "KM Range",
@@ -67,7 +63,6 @@ def export_requests(
         ]
         ws.append(headers)
 
-        # Style header row (Navy Blue with White text)
         header_fill = PatternFill(start_color="000080", end_color="000080", fill_type="solid")
         header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
         for col_idx in range(1, len(headers) + 1):
@@ -76,7 +71,6 @@ def export_requests(
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Data rows
         for row_idx, r in enumerate(records, start=2):
             start_str = r.earliest_start.strftime("%Y-%m-%d %H:%M") if r.earliest_start else ""
             end_str = r.latest_end.strftime("%Y-%m-%d %H:%M") if r.latest_end else ""
@@ -108,13 +102,11 @@ def export_requests(
             ]
             ws.append(row_data)
 
-            # Alternate row coloring
             if row_idx % 2 == 0:
                 row_fill = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
                 for col_idx in range(1, len(headers) + 1):
                     ws.cell(row=row_idx, column=col_idx).fill = row_fill
 
-        # Auto-adjust column widths
         for col in ws.columns:
             max_len = max(len(str(cell.value or "")) for cell in col)
             col_letter = openpyxl.utils.get_column_letter(col[0].column)
@@ -130,7 +122,6 @@ def export_requests(
         )
 
     else:
-        # PDF Generation via ReportLab
         output = io.BytesIO()
         doc = SimpleDocTemplate(output, pagesize=landscape(letter), leftMargin=20, rightMargin=20, topMargin=20, bottomMargin=20)
         elements = []
@@ -144,7 +135,7 @@ def export_requests(
             spaceAfter=10
         )
         elements.append(Paragraph("Indian Railways — Maintenance Requests Status Report", title_style))
-        elements.append(Paragraph(f"Generated: {datetime.now(APP_TIMEZONE).strftime('%d-%b-%Y %H:%M:%S IST')} | User: {current_user.username} ({current_user.role})", styles["Normal"]))
+        elements.append(Paragraph(f"Generated: {datetime.now(APP_TIMEZONE).strftime('%d-%b-%Y %H:%M:%S IST')}", styles["Normal"]))
         elements.append(Spacer(1, 12))
 
         table_data = [[
@@ -192,11 +183,10 @@ def export_requests(
 def export_approvals(
     format: str = Query("excel", pattern="^(excel|xlsx|pdf)$"),
     schedule_id: Optional[str] = None,
-    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Exports full approval audit history to Excel or PDF.
+    Exports full approval audit history to Excel (.xlsx) or PDF.
     """
     query = db.query(DBApprovalAudit)
     if schedule_id:
@@ -268,7 +258,7 @@ def export_approvals(
             spaceAfter=10
         )
         elements.append(Paragraph("Indian Railways — Approval & Decision Audit History", title_style))
-        elements.append(Paragraph(f"Exported: {datetime.now(APP_TIMEZONE).strftime('%d-%b-%Y %H:%M:%S IST')} | User: {current_user.username}", styles["Normal"]))
+        elements.append(Paragraph(f"Exported: {datetime.now(APP_TIMEZONE).strftime('%d-%b-%Y %H:%M:%S IST')}", styles["Normal"]))
         elements.append(Spacer(1, 12))
 
         table_data = [[

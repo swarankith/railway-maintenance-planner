@@ -8,35 +8,32 @@ import { BlockDetailModal } from './components/BlockDetailModal';
 import { ApprovalHub } from './components/ApprovalHub';
 import { EditRequestModal } from './components/EditRequestModal';
 import { ApprovalHistoryPortal } from './components/ApprovalHistoryPortal';
-import { LoginView } from './components/LoginView';
 import {
   MaintenanceRequest,
+  TrainMovement,
   ConflictDetail,
   SchedulePlan,
   MaintenanceBlock,
   ActiveTab,
-  User,
 } from './types';
 import {
   fetchRequests,
+  fetchTrains,
   checkConflicts,
   optimizeSchedule,
+  runDemoSchedule,
   createRequest,
   updateRequest,
-  getAuthToken,
-  getStoredUser,
-  clearAuthToken,
-  fetchMe,
 } from './services/api';
+import { Sparkles } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [authChecked, setAuthChecked] = useState(false);
-
   const [activeTab, setActiveTab] = useState<ActiveTab>('ingest');
   const [requests, setRequests] = useState<MaintenanceRequest[]>([]);
+  const [trains, setTrains] = useState<TrainMovement[]>([]);
   const [conflicts, setConflicts] = useState<ConflictDetail[]>([]);
   const [schedulePlan, setSchedulePlan] = useState<SchedulePlan | null>(null);
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
 
   const [selectedBlock, setSelectedBlock] = useState<MaintenanceBlock | null>(null);
   const [isBlockModalOpen, setIsBlockModalOpen] = useState(false);
@@ -47,6 +44,7 @@ export const App: React.FC = () => {
 
   const [loading, setLoading] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [isDemoLoading, setIsDemoLoading] = useState(false);
   const [isCheckingConflicts, setIsCheckingConflicts] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
@@ -55,58 +53,25 @@ export const App: React.FC = () => {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // Check auth session on load
-  useEffect(() => {
-    const token = getAuthToken();
-    const stored = getStoredUser();
-    if (token && stored) {
-      setCurrentUser(stored);
-      fetchMe()
-        .then((user) => setCurrentUser(user))
-        .catch(() => {
-          clearAuthToken();
-          setCurrentUser(null);
-        })
-        .finally(() => setAuthChecked(true));
-    } else {
-      setAuthChecked(true);
-    }
-  }, []);
-
   const loadAllData = async () => {
-    if (!getAuthToken()) return;
     setLoading(true);
     try {
-      const reqList = await fetchRequests();
+      const [reqList, trainList] = await Promise.all([
+        fetchRequests().catch(() => []),
+        fetchTrains().catch(() => []),
+      ]);
       setRequests(reqList);
+      setTrains(trainList);
     } catch (err: any) {
-      if (err.message.includes('Session expired') || err.message.includes('Authentication required')) {
-        clearAuthToken();
-        setCurrentUser(null);
-      } else {
-        showToast(err.message || 'Failed to load requests', 'error');
-      }
+      showToast(err.message || 'Failed to load initial data', 'error');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (currentUser) {
-      loadAllData();
-    }
-  }, [currentUser]);
-
-  const handleLoginSuccess = (user: User) => {
-    setCurrentUser(user);
-    showToast(`Welcome back, ${user.username} (${user.role})!`, 'success');
-  };
-
-  const handleLogout = () => {
-    clearAuthToken();
-    setCurrentUser(null);
-    showToast('Logged out successfully.', 'info');
-  };
+    loadAllData();
+  }, []);
 
   const handleTriggerConflictCheck = async () => {
     setIsCheckingConflicts(true);
@@ -127,6 +92,7 @@ export const App: React.FC = () => {
     try {
       const plan = await optimizeSchedule();
       setSchedulePlan(plan);
+      setIsDemoMode(false);
       await loadAllData();
       setActiveTab('gantt');
       showToast('Optimization complete! Bundled blocks generated with Deterministic Engine.', 'success');
@@ -134,6 +100,41 @@ export const App: React.FC = () => {
       showToast(err.message || 'Optimization failed', 'error');
     } finally {
       setIsOptimizing(false);
+    }
+  };
+
+  const handleLoadDemo = async () => {
+    setIsDemoLoading(true);
+    try {
+      const demoPlan = await runDemoSchedule();
+      setSchedulePlan(demoPlan);
+      setIsDemoMode(true);
+
+      // Extract requests from demo plan for UI display if needed
+      const demoRequests: MaintenanceRequest[] = [];
+      demoPlan.blocks.forEach((b) => {
+        b.requests.forEach((r) => {
+          if (!demoRequests.some((dr) => dr.request_id === r.request_id)) {
+            demoRequests.push(r);
+          }
+        });
+      });
+      if (demoPlan.deferred_requests) {
+        demoRequests.push(...demoPlan.deferred_requests);
+      }
+      if (demoPlan.manual_review_requests) {
+        demoRequests.push(...demoPlan.manual_review_requests);
+      }
+      if (demoRequests.length > 0) {
+        setRequests(demoRequests);
+      }
+
+      setActiveTab('gantt');
+      showToast('Demo mode active! Standard fixtures loaded in-memory (bypassed database).', 'info');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to run demo simulation', 'error');
+    } finally {
+      setIsDemoLoading(false);
     }
   };
 
@@ -165,19 +166,6 @@ export const App: React.FC = () => {
     setIsBlockModalOpen(true);
   };
 
-  if (!authChecked) {
-    return (
-      <div className="min-h-screen bg-slate-100 flex items-center justify-center text-slate-600 font-semibold text-sm">
-        Initializing RailBlock AI Portal...
-      </div>
-    );
-  }
-
-  // If not logged in, show Login Screen
-  if (!currentUser) {
-    return <LoginView onLoginSuccess={handleLoginSuccess} />;
-  }
-
   const needsReviewCount = requests.filter((r) => r.status === 'Needs-Review').length;
 
   return (
@@ -190,9 +178,15 @@ export const App: React.FC = () => {
         conflictsCount={conflicts.length}
         needsReviewCount={needsReviewCount}
         hasSchedule={schedulePlan !== null}
-        currentUser={currentUser}
-        onLogout={handleLogout}
       />
+
+      {/* Demo Mode Banner */}
+      {isDemoMode && (
+        <div className="bg-purple-900 text-white px-4 py-2 text-xs font-bold text-center flex items-center justify-center gap-2 border-b border-purple-700 shadow-inner">
+          <Sparkles className="w-4 h-4 text-purple-300" />
+          <span>Demo Mode Active — Data in-memory only, will not be saved to database.</span>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {toast && (
@@ -219,6 +213,11 @@ export const App: React.FC = () => {
             onEditRequest={openEditModal}
             setActiveTab={setActiveTab}
             requests={requests}
+            trains={trains}
+            onTriggerOptimization={handleTriggerOptimization}
+            isOptimizing={isOptimizing}
+            onLoadDemo={handleLoadDemo}
+            isDemoLoading={isDemoLoading}
           />
         )}
 
@@ -247,6 +246,7 @@ export const App: React.FC = () => {
         {activeTab === 'gantt' && (
           <GanttChart
             schedulePlan={schedulePlan}
+            trains={trains}
             onSelectBlock={openBlockModal}
             setActiveTab={setActiveTab}
           />

@@ -1,17 +1,20 @@
 """
-Conflict Detection Engine for Railway Maintenance Requests.
-Phase 2 Enhancements & Bug Fixes:
-- Bug Fix 3: Robust KM Range Parsing (handles '10-12 km', 'KM 10 to 12', '10/12', '10.5 – 12.3')
-- Bug Fix 4: Resource Name Normalization (lowercase + hyphen/underscore -> space + collapse spaces)
-- Bug Fix 5: Endpoint Touching Policy (exact boundary contact treated as NON-overlap)
-- Same-Asset Hard Clash Detection (Rule C)
+Conflict Detection Engine for Railway Maintenance Requests (Part A.3).
+- Structured objects: ID, cycle ID, involved IDs, type (SpatialTimeKM, Resource, TrainMovement, Compatibility, SameAssetClash, CompetingEmergency)
+- Time buffer: [start - 15min, end + 15min]
+- Min KM overlap: min(kme1, kme2) - max(kms1, kms2) >= 0.1
+- Resource normalization: lowercase, '-', '_', space equivalent
+- Duplicate detection: rapidfuzz token_sort_ratio >= 90
+- Rule C: exact match on normalized work_type and normalized asset (lowercase, strip whitespace/punctuation)
 """
 import re
+import string
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional, Set
+from rapidfuzz import fuzz
 
-from backend.config import is_department_pair_compatible
+from backend.config import is_department_pair_compatible, INCOMPATIBLE_CAT_A_PAIRS
 from backend.models import (
     MaintenanceRequest,
     TrainMovement,
@@ -19,43 +22,59 @@ from backend.models import (
     ConflictTypeEnum,
 )
 
+TIME_BUFFER = timedelta(minutes=15)
+MIN_KM_OVERLAP = 0.1
+
 
 def normalize_resource_name(res: str) -> str:
-    """
-    Bug Fix 4: Normalizes resource strings.
-    Converts to lowercase, turns hyphens/underscores into spaces, collapses consecutive spaces.
-    """
+    """Normalizes resource strings: lowercase, -/_ to space, collapsed spaces."""
     if not res:
         return ""
     cleaned = re.sub(r"[-_]+", " ", res.strip().lower())
     return " ".join(cleaned.split())
 
 
-def intervals_overlap(start1: datetime, end1: datetime, start2: datetime, end2: datetime) -> bool:
-    """
-    Returns True if two datetime intervals strictly overlap.
-    Bug Fix 5: Endpoint boundary touching (e.g. end1 == start2) is NON-overlapping (< used).
-    """
+def normalize_string_exact(val: str) -> str:
+    """Lowercase, strip whitespace and punctuation for exact matching."""
+    if not val:
+        return ""
+    # Remove punctuation
+    val = "".join(c for c in val if c not in string.punctuation)
+    return " ".join(val.lower().split())
+
+
+def buffered_intervals_overlap(
+    start1: datetime, end1: datetime,
+    start2: datetime, end2: datetime,
+    buffer: timedelta = TIME_BUFFER
+) -> bool:
+    """Applies [start - 15min, end + 15min] buffer to intervals."""
+    b_s1, b_e1 = start1 - buffer, end1 + buffer
+    b_s2, b_e2 = start2 - buffer, end2 + buffer
+    return max(b_s1, b_s2) < min(b_e1, b_e2)
+
+
+def raw_intervals_overlap(start1: datetime, end1: datetime, start2: datetime, end2: datetime) -> bool:
+    """Strict interval overlap without buffer."""
     return max(start1, start2) < min(end1, end2)
 
 
+intervals_overlap = buffered_intervals_overlap
+
+
 def get_overlap_interval(start1: datetime, end1: datetime, start2: datetime, end2: datetime) -> Tuple[datetime, datetime]:
-    """Calculates the overlapping datetime range."""
     return max(start1, start2), min(end1, end2)
 
 
 def km_ranges_overlap(km_s1: float, km_e1: float, km_s2: float, km_e2: float) -> bool:
-    """
-    Returns True if two kilometer spans strictly overlap.
-    Bug Fix 5: Exact boundary touching (e.g. max(s1, s2) == min(e1, e2)) is NON-overlapping.
-    """
+    """Conflict only if min(kme1, kme2) - max(kms1, kms2) >= 0.1."""
     s1, e1 = min(km_s1, km_e1), max(km_s1, km_e1)
     s2, e2 = min(km_s2, km_e2), max(km_s2, km_e2)
-    return max(s1, s2) < min(e1, e2)
+    overlap = min(e1, e2) - max(s1, s2)
+    return overlap >= MIN_KM_OVERLAP - 1e-9
 
 
 def get_km_overlap(km_s1: float, km_e1: float, km_s2: float, km_e2: float) -> Tuple[float, float]:
-    """Calculates the overlapping KM span."""
     s1, e1 = min(km_s1, km_e1), max(km_s1, km_e1)
     s2, e2 = min(km_s2, km_e2), max(km_s2, km_e2)
     return max(s1, s2), min(e1, e2)
@@ -63,7 +82,7 @@ def get_km_overlap(km_s1: float, km_e1: float, km_s2: float, km_e2: float) -> Tu
 
 def parse_km_range_robust(text: str) -> Tuple[Optional[float], Optional[float]]:
     """
-    Bug Fix 3: Parses KM ranges from diverse formats:
+    Parses KM ranges from diverse formats:
     - '10-12 km', '10 - 12 km', 'KM 10 to 12', 'KM: 10 to 12'
     - '10/12', '10.5 – 12.3', '10.5 - 12.3', '10.5/12.3'
     - 'KM 45.2', 'Chainage 120.0 to 125.5'
@@ -71,10 +90,8 @@ def parse_km_range_robust(text: str) -> Tuple[Optional[float], Optional[float]]:
     if not text:
         return None, None
 
-    # Replace en-dash, em-dash, slashes with hyphens for clean matching
     clean_txt = text.replace("–", "-").replace("—", "-").strip()
 
-    # Pattern: KM 10 to 12, 10-12 km, 10.5 - 12.3, 10/12
     m1 = re.search(
         r"(?:km|kilometer|chainage|ch)?\s*[:\s]?\s*(\d+(?:\.\d+)?)\s*(?:to|-|\/|and)\s*(?:km)?\s*(\d+(?:\.\d+)?)",
         clean_txt,
@@ -88,7 +105,6 @@ def parse_km_range_robust(text: str) -> Tuple[Optional[float], Optional[float]]:
         except (ValueError, TypeError):
             pass
 
-    # Single KM point
     m2 = re.search(r"(?:km|kilometer)\s*[:\s]?\s*(\d+(?:\.\d+)?)", clean_txt, re.IGNORECASE)
     if m2:
         try:
@@ -100,13 +116,34 @@ def parse_km_range_robust(text: str) -> Tuple[Optional[float], Optional[float]]:
     return None, None
 
 
+def is_duplicate_request(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
+    """
+    Duplicate detection timing: rapidfuzz.token_sort_ratio >= 90 on:
+    corridor + department + work_type + km_range + start_time
+    """
+    s1 = (
+        f"{r1.corridor} {r1.department} {r1.work_type} "
+        f"{min(r1.km_start, r1.km_end):.1f}-{max(r1.km_start, r1.km_end):.1f} "
+        f"{r1.earliest_start.strftime('%Y-%m-%d %H:%M')}"
+    )
+    s2 = (
+        f"{r2.corridor} {r2.department} {r2.work_type} "
+        f"{min(r2.km_start, r2.km_end):.1f}-{max(r2.km_start, r2.km_end):.1f} "
+        f"{r2.earliest_start.strftime('%Y-%m-%d %H:%M')}"
+    )
+    ratio = fuzz.token_sort_ratio(s1, s2)
+    return ratio >= 90
+
+
 def detect_all_conflicts(
     requests: List[MaintenanceRequest],
-    train_movements: Optional[List[TrainMovement]] = None
+    train_movements: Optional[List[TrainMovement]] = None,
+    cycle_id: Optional[str] = None
 ) -> List[ConflictDetail]:
     """
-    Evaluates all maintenance requests and train movements to find genuine conflicts.
-    Strictly eliminates false positives across different corridors, dates, and non-overlapping KM spans.
+    Evaluates all maintenance requests and train movements for conflicts using A.3 rules:
+    - Time buffer: [start - 15min, end + 15min]
+    - Min KM overlap: min(kme1, kme2) - max(kms1, kms2) >= 0.1
     """
     conflicts: List[ConflictDetail] = []
     if train_movements is None:
@@ -116,30 +153,28 @@ def detect_all_conflicts(
     for i in range(n):
         r1 = requests[i]
 
-        # -------------------------------------------------------------
-        # Pairwise Request Conflicts (i < j)
-        # -------------------------------------------------------------
         for j in range(i + 1, n):
             r2 = requests[j]
 
             same_corridor = r1.corridor.strip().upper() == r2.corridor.strip().upper()
-            time_overlap = intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end)
+            time_overlap = buffered_intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end)
             km_overlap = km_ranges_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end)
 
             if same_corridor and time_overlap and km_overlap:
                 t_ov_start, t_ov_end = get_overlap_interval(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end)
                 km_ov_start, km_ov_end = get_km_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end)
 
-                # Same-Asset Hard Clash (Rule C)
-                norm_work1 = " ".join(r1.work_type.lower().split())
-                norm_work2 = " ".join(r2.work_type.lower().split())
-                norm_asset1 = " ".join(r1.asset.lower().split())
-                norm_asset2 = " ".join(r2.asset.lower().split())
+                # Rule C: Same normalized work_type AND same normalized asset (exact match)
+                norm_work1 = normalize_string_exact(r1.work_type)
+                norm_work2 = normalize_string_exact(r2.work_type)
+                norm_asset1 = normalize_string_exact(r1.asset)
+                norm_asset2 = normalize_string_exact(r2.asset)
 
                 if norm_work1 == norm_work2 and norm_asset1 == norm_asset2:
                     conflicts.append(ConflictDetail(
                         conflict_id=f"CONF-{uuid.uuid4().hex[:6].upper()}",
-                        conflict_type=ConflictTypeEnum.SAME_ASSET_HARD_CLASH,
+                        cycle_id=cycle_id,
+                        conflict_type=ConflictTypeEnum.SAME_ASSET_CLASH,
                         severity="Hard",
                         request_ids=[r1.request_id, r2.request_id],
                         corridor=r1.corridor,
@@ -156,14 +191,25 @@ def detect_all_conflicts(
                     ))
                     continue
 
-                # Department Compatibility Check
-                compatible = is_department_pair_compatible(r1.department, r2.department)
+                # Incompatible Category A pair check (Part A.2)
+                pair1 = (norm_work1, norm_work2)
+                pair2 = (norm_work2, norm_work1)
+                is_incompatible_cat_a = False
+                for p in INCOMPATIBLE_CAT_A_PAIRS:
+                    pn0 = normalize_string_exact(p[0])
+                    pn1 = normalize_string_exact(p[1])
+                    if (norm_work1 == pn0 and norm_work2 == pn1) or (norm_work1 == pn1 and norm_work2 == pn0):
+                        is_incompatible_cat_a = True
+                        break
+
+                compatible = is_department_pair_compatible(r1.department, r2.department) and not is_incompatible_cat_a
                 both_shareable = r1.block_shared_allowed and r2.block_shared_allowed
 
                 if not both_shareable or not compatible:
                     conflicts.append(ConflictDetail(
                         conflict_id=f"CONF-{uuid.uuid4().hex[:6].upper()}",
-                        conflict_type=ConflictTypeEnum.DEPARTMENT_INCOMPATIBILITY if not compatible else ConflictTypeEnum.SPATIAL_TIME_KM,
+                        cycle_id=cycle_id,
+                        conflict_type=ConflictTypeEnum.COMPATIBILITY if not compatible else ConflictTypeEnum.SPATIAL_TIME_KM,
                         severity="Hard",
                         request_ids=[r1.request_id, r2.request_id],
                         corridor=r1.corridor,
@@ -181,6 +227,7 @@ def detect_all_conflicts(
                 else:
                     conflicts.append(ConflictDetail(
                         conflict_id=f"CONF-{uuid.uuid4().hex[:6].upper()}",
+                        cycle_id=cycle_id,
                         conflict_type=ConflictTypeEnum.SPATIAL_TIME_KM,
                         severity="ReviewRequired",
                         request_ids=[r1.request_id, r2.request_id],
@@ -197,7 +244,7 @@ def detect_all_conflicts(
                         suggested_resolution="Bundle both jobs into a single combined corridor block to minimize line closure downtime."
                     ))
 
-            # Resource Double-Booking Check (normalized comparison)
+            # Resource Double-Booking Check (normalized comparison with 15min buffer)
             r1_norm_res = {normalize_resource_name(x): x for x in r1.required_resources if x}
             r2_norm_res = {normalize_resource_name(x): x for x in r2.required_resources if x}
             shared_keys = set(r1_norm_res.keys()).intersection(set(r2_norm_res.keys()))
@@ -208,7 +255,8 @@ def detect_all_conflicts(
                     res_display = r1_norm_res[k]
                     conflicts.append(ConflictDetail(
                         conflict_id=f"CONF-{uuid.uuid4().hex[:6].upper()}",
-                        conflict_type=ConflictTypeEnum.RESOURCE_OVERLAP,
+                        cycle_id=cycle_id,
+                        conflict_type=ConflictTypeEnum.RESOURCE,
                         severity="Hard",
                         request_ids=[r1.request_id, r2.request_id],
                         corridor=f"{r1.corridor} vs {r2.corridor}" if r1.corridor != r2.corridor else r1.corridor,
@@ -222,12 +270,10 @@ def detect_all_conflicts(
                         suggested_resolution=f"Shift {r2.request_id} to start after {r1.request_id} finishes using '{res_display}'."
                     ))
 
-        # -------------------------------------------------------------
-        # Maintenance vs Train Movement Conflicts (Hard Safety Constraint)
-        # -------------------------------------------------------------
+        # Train Movement Conflicts (Hard Safety Constraint with 15min buffer and min 0.1km overlap)
         for train in train_movements:
             same_corr = r1.corridor.strip().upper() == train.corridor.strip().upper()
-            t_overlap = intervals_overlap(r1.earliest_start, r1.latest_end, train.departure_time, train.arrival_time)
+            t_overlap = buffered_intervals_overlap(r1.earliest_start, r1.latest_end, train.departure_time, train.arrival_time)
             k_overlap = km_ranges_overlap(r1.km_start, r1.km_end, train.km_start, train.km_end)
 
             if same_corr and t_overlap and k_overlap:
@@ -236,7 +282,8 @@ def detect_all_conflicts(
 
                 conflicts.append(ConflictDetail(
                     conflict_id=f"CONF-{uuid.uuid4().hex[:6].upper()}",
-                    conflict_type=ConflictTypeEnum.TRAIN_MOVEMENT_CONFLICT,
+                    cycle_id=cycle_id,
+                    conflict_type=ConflictTypeEnum.TRAIN_MOVEMENT,
                     severity="Hard",
                     request_ids=[r1.request_id],
                     corridor=r1.corridor,

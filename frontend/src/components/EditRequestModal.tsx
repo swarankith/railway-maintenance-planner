@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, AlertCircle, Sparkles, Wrench, Clock, MapPin, Zap } from 'lucide-react';
-import { MaintenanceRequest, Department, BlockType } from '../types';
+import { MaintenanceRequest, Department, BlockType, PriorityLevel } from '../types';
 
 interface EditRequestModalProps {
   isOpen: boolean;
@@ -79,7 +79,7 @@ export const EditRequestModal: React.FC<EditRequestModalProps> = ({
         km_start: Number(formData.km_start),
         km_end: Number(formData.km_end),
         duration_minutes: Number(formData.duration_minutes),
-        priority: Number(formData.priority) in [1, 2, 3] ? Number(formData.priority) : 3,
+        priority: (Number(formData.priority) in [1, 2, 3] ? Number(formData.priority) : 3) as PriorityLevel,
         corridor: (formData.corridor || '').toUpperCase().trim(),
       });
       onClose();
@@ -250,7 +250,7 @@ export const EditRequestModal: React.FC<EditRequestModalProps> = ({
               </label>
               <select
                 value={formData.priority || 3}
-                onChange={(e) => setFormData({ ...formData, priority: parseInt(e.target.value) })}
+                onChange={(e) => setFormData({ ...formData, priority: parseInt(e.target.value) as PriorityLevel })}
                 className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-navy-800 font-bold"
               >
                 <option value={1}>P1 — Emergency</option>

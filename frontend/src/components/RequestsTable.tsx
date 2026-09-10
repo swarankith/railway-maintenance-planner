@@ -19,7 +19,7 @@ import {
   Download,
 } from 'lucide-react';
 import { MaintenanceRequest, Department, RequestStatus } from '../types';
-import { deleteRequest, confirmRequest, downloadExport } from '../services/api';
+import { deleteRequest, confirmRequest, downloadExport, bulkDeleteRequests } from '../services/api';
 
 interface RequestsTableProps {
   requests: MaintenanceRequest[];
@@ -47,6 +47,9 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
   const [selectedStatus, setSelectedStatus] = useState<string>('ALL');
   const [selectedPriority, setSelectedPriority] = useState<string>('ALL');
   const [isExporting, setIsExporting] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
 
   const handleExport = async (format: 'excel' | 'pdf') => {
     setIsExporting(format);
@@ -73,6 +76,53 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
 
     return matchesSearch && matchesDept && matchesStatus && matchesPriority;
   });
+
+  const allFilteredIds = filteredRequests.map((r) => r.request_id);
+  const isAllSelected =
+    allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedIds.includes(id));
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      setSelectedIds((prev) => prev.filter((id) => !allFilteredIds.includes(id)));
+    } else {
+      setSelectedIds((prev) => Array.from(new Set([...prev, ...allFilteredIds])));
+    }
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.length === 0) return;
+    if (
+      !window.confirm(
+        `Are you sure you want to delete ${selectedIds.length} selected maintenance request(s)?`
+      )
+    ) {
+      return;
+    }
+
+    setIsBulkDeleting(true);
+    setBulkNotice(null);
+    try {
+      const res = await bulkDeleteRequests(selectedIds);
+      let msg = `Deleted ${res.deleted_count} request(s).`;
+      if (res.skipped_count > 0) {
+        msg += ` Skipped ${res.skipped_count} request(s) currently locked in active cycles.`;
+      }
+      setBulkNotice(msg);
+      setSelectedIds([]);
+      onRefresh();
+      setTimeout(() => setBulkNotice(null), 5000);
+    } catch (err: any) {
+      alert(err.message || 'Bulk delete failed');
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
 
   const getPriorityBadge = (p: number) => {
     switch (p) {
@@ -154,6 +204,7 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
   const handleDelete = async (id: string) => {
     if (window.confirm(`Delete request ${id}?`)) {
       await deleteRequest(id);
+      setSelectedIds((prev) => prev.filter((i) => i !== id));
       onRefresh();
     }
   };
@@ -179,6 +230,17 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
+          {selectedIds.length > 0 && (
+            <button
+              onClick={handleBulkDelete}
+              disabled={isBulkDeleting}
+              className="px-3.5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl shadow-sm flex items-center gap-1.5 transition-all animate-in fade-in duration-200"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>{isBulkDeleting ? 'Deleting...' : `Delete Selected (${selectedIds.length})`}</span>
+            </button>
+          )}
+
           {/* Export to Excel */}
           <button
             onClick={() => handleExport('excel')}
@@ -234,6 +296,18 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
           </button>
         </div>
       </div>
+
+      {bulkNotice && (
+        <div className="p-3 bg-navy-900 text-white text-xs font-semibold rounded-xl border border-navy-700 flex items-center justify-between">
+          <span>{bulkNotice}</span>
+          <button
+            onClick={() => setBulkNotice(null)}
+            className="text-slate-300 hover:text-white font-bold ml-2"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Filter & Search Toolbar */}
       <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-wrap items-center gap-3">
@@ -296,6 +370,14 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-navy-800 text-white font-bold uppercase tracking-wider text-[11px]">
+                <th className="py-3.5 px-4 w-10">
+                  <input
+                    type="checkbox"
+                    checked={isAllSelected}
+                    onChange={toggleSelectAll}
+                    className="rounded border-slate-400 text-saffron-600 focus:ring-saffron-500 cursor-pointer"
+                  />
+                </th>
                 <th className="py-3.5 px-4">Application ID</th>
                 <th className="py-3.5 px-4">Request ID</th>
                 <th className="py-3.5 px-4">Department & Asset</th>
@@ -310,110 +392,123 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
             <tbody className="divide-y divide-slate-100 text-slate-800">
               {filteredRequests.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400 font-medium">
+                  <td colSpan={10} className="py-12 text-center text-slate-400 font-medium">
                     No matching maintenance requests found in database.
                   </td>
                 </tr>
               ) : (
-                filteredRequests.map((req) => (
-                  <tr
-                    key={req.request_id}
-                    className={`hover:bg-saffron-50/40 transition-colors ${
-                      req.status === 'Needs-Review' ? 'bg-amber-50/30' : ''
-                    }`}
-                  >
-                    {/* App ID */}
-                    <td className="py-3 px-4 font-mono font-bold text-navy-800">
-                      {req.application_id || 'APP-LEGACY'}
-                    </td>
+                filteredRequests.map((req) => {
+                  const isSelected = selectedIds.includes(req.request_id);
+                  return (
+                    <tr
+                      key={req.request_id}
+                      className={`hover:bg-saffron-50/40 transition-colors ${
+                        isSelected ? 'bg-saffron-50/60' : req.status === 'Needs-Review' ? 'bg-amber-50/30' : ''
+                      }`}
+                    >
+                      {/* Checkbox */}
+                      <td className="py-3 px-4">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectOne(req.request_id)}
+                          className="rounded border-slate-300 text-saffron-600 focus:ring-saffron-500 cursor-pointer"
+                        />
+                      </td>
 
-                    {/* Request ID */}
-                    <td className="py-3 px-4 font-bold text-slate-900">
-                      {req.request_id}
-                    </td>
+                      {/* App ID */}
+                      <td className="py-3 px-4 font-mono font-bold text-navy-800">
+                        {req.application_id || 'APP-LEGACY'}
+                      </td>
 
-                    {/* Department & Asset */}
-                    <td className="py-3 px-4">
-                      <div className="font-bold text-slate-900">{req.department}</div>
-                      <div className="text-[11px] text-slate-500 truncate max-w-[140px]">
-                        {req.asset}
-                      </div>
-                    </td>
+                      {/* Request ID */}
+                      <td className="py-3 px-4 font-bold text-slate-900">
+                        {req.request_id}
+                      </td>
 
-                    {/* Corridor & KM */}
-                    <td className="py-3 px-4">
-                      <div className="font-bold text-navy-900">{req.corridor}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">
-                        KM {req.km_start.toFixed(1)} – {req.km_end.toFixed(1)}
-                      </div>
-                    </td>
-
-                    {/* Work Nature */}
-                    <td className="py-3 px-4">
-                      <div className="font-medium text-slate-900 max-w-[180px] truncate" title={req.work_type}>
-                        {req.work_type}
-                      </div>
-                      {req.required_resources.length > 0 && (
-                        <div className="text-[10px] text-slate-400 truncate max-w-[180px]">
-                          {req.required_resources.join(', ')}
+                      {/* Department & Asset */}
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-900">{req.department}</div>
+                        <div className="text-[11px] text-slate-500 truncate max-w-[140px]">
+                          {req.asset}
                         </div>
-                      )}
-                    </td>
+                      </td>
 
-                    {/* Priority */}
-                    <td className="py-3 px-4">{getPriorityBadge(req.priority)}</td>
-
-                    {/* Window */}
-                    <td className="py-3 px-4">
-                      <div className="font-mono text-slate-900 font-semibold">
-                        {new Date(req.earliest_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })} –{' '}
-                        {new Date(req.latest_end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                      </div>
-                      <div className="text-[11px] text-slate-500">
-                        {req.duration_minutes} mins
-                      </div>
-                    </td>
-
-                    {/* Status */}
-                    <td className="py-3 px-4">
-                      {getStatusBadge(req.status)}
-                      {req.missing_fields && req.missing_fields.length > 0 && (
-                        <div className="text-[10px] text-amber-700 font-semibold mt-0.5">
-                          Missing: {req.missing_fields.join(', ')}
+                      {/* Corridor & KM */}
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-navy-900">{req.corridor}</div>
+                        <div className="text-[11px] text-slate-500 font-mono">
+                          KM {req.km_start.toFixed(1)} – {req.km_end.toFixed(1)}
                         </div>
-                      )}
-                    </td>
+                      </td>
 
-                    {/* Actions */}
-                    <td className="py-3 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        {req.status === 'Needs-Review' && (
-                          <button
-                            onClick={() => handleConfirm(req.request_id)}
-                            title="Quick Confirm"
-                            className="p-1.5 text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all"
-                          >
-                            <CheckCircle className="w-4 h-4" />
-                          </button>
+                      {/* Work Nature */}
+                      <td className="py-3 px-4">
+                        <div className="font-medium text-slate-900 max-w-[180px] truncate" title={req.work_type}>
+                          {req.work_type}
+                        </div>
+                        {req.required_resources.length > 0 && (
+                          <div className="text-[10px] text-slate-400 truncate max-w-[180px]">
+                            {req.required_resources.join(', ')}
+                          </div>
                         )}
-                        <button
-                          onClick={() => onEdit(req)}
-                          title="Edit Request"
-                          className="p-1.5 text-navy-800 hover:bg-navy-50 rounded-lg transition-all"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(req.request_id)}
-                          title="Delete Request"
-                          className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                      </td>
+
+                      {/* Priority */}
+                      <td className="py-3 px-4">{getPriorityBadge(req.priority)}</td>
+
+                      {/* Window */}
+                      <td className="py-3 px-4">
+                        <div className="font-mono text-slate-900 font-semibold">
+                          {new Date(req.earliest_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })} –{' '}
+                          {new Date(req.latest_end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          {req.duration_minutes} mins
+                        </div>
+                      </td>
+
+                      {/* Status */}
+                      <td className="py-3 px-4">
+                        {getStatusBadge(req.status)}
+                        {req.missing_fields && req.missing_fields.length > 0 && (
+                          <div className="text-[10px] text-amber-700 font-semibold mt-0.5">
+                            Missing: {req.missing_fields.join(', ')}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Actions */}
+                      <td className="py-3 px-4 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          {req.status === 'Needs-Review' && (
+                            <button
+                              onClick={() => handleConfirm(req.request_id)}
+                              title="Quick Confirm"
+                              className="p-1.5 text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all"
+                            >
+                              <CheckCircle className="w-4 h-4" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => onEdit(req)}
+                            title="Edit Request"
+                            className="p-1.5 text-navy-800 hover:bg-navy-50 rounded-lg transition-all"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(req.request_id)}
+                            title="Delete Request"
+                            className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

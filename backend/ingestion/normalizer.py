@@ -1,17 +1,21 @@
 """
 Robust Normalization Layer for Railway Maintenance Requests and Train Movements.
-Converts arbitrary tables, key-value blocks, and prose into canonical MaintenanceRequest objects.
+Converts arbitrary tables, key-value blocks, and prose into canonical MaintenanceRequest and TrainMovement objects.
 Flags incomplete or ambiguous records as Needs-Review.
-Phase 2 Updates:
-- Priority Convention: 1=Emergency, 2=High Urgent, 3=Normal (values > 3 flagged)
+Phase 2 Final (v6) Updates:
+- Priority Convention: 1=Emergency, 2=High Urgent, 3=Normal
 - Application ID assignment: APP-YYYYMMDD-XXXXXX per document
-- Robust KM parsing and resource normalization
+- doc_type parameter support ('request' | 'train_movement')
+- normalize_train_table() for train movement tables
+- KM Sanity check: km_end - km_start > 100 -> Needs-Review
+- Dedicated confidence_score calculation per K.9
 """
 import re
 import uuid
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from zoneinfo import ZoneInfo
+from rapidfuzz import fuzz
 
 from backend.config import APP_TIMEZONE
 from backend.models import (
@@ -25,10 +29,9 @@ from backend.models import (
 )
 from backend.ingestion.extractor import DocumentContent
 from backend.engine.conflicts import parse_km_range_robust, normalize_resource_name
+from backend.engine.batch_engine import classify_work_type
 
-# Alias for backwards compatibility
 parse_km_range = parse_km_range_robust
-
 
 DEPT_PATTERNS = {
     DepartmentEnum.ENGINEERING: [
@@ -162,13 +165,6 @@ def parse_time_window(text: str, default_date: Optional[date] = None) -> Tuple[O
 
 
 def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
-    """
-    Normalizes priority:
-    1 = Emergency
-    2 = High Urgent
-    3 = Normal
-    Returns (priority, reason, is_flagged_for_review).
-    """
     t_lower = text.lower().strip()
     m_num = re.search(r"\b([1-9])\b", text)
     if m_num:
@@ -177,7 +173,6 @@ def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
             labels = {1: "P1 - Emergency", 2: "P2 - High Urgent", 3: "P3 - Normal"}
             return p, labels[p], False
         else:
-            # Value > 3 flagged for human review
             return 3, f"Priority {p} specified exceeds Phase 2 range (1-3); normalized to Normal (P3) and flagged for review", True
 
     if any(w in t_lower for w in ["critical", "emergency", "urgent", "safety defect", "derailment risk", "immediate", "p1"]):
@@ -205,6 +200,114 @@ def extract_resources(text: str) -> List[str]:
         if re.search(r"\b" + re.escape(r) + r"\b", text, re.IGNORECASE):
             found.append(normalize_resource_name(r).title())
     return list(dict.fromkeys(found))
+
+
+def compute_confidence_score(
+    required_fields_count: int,
+    total_required_fields: int,
+    work_type_matched: bool,
+    km_and_time_unambiguous: bool
+) -> float:
+    """
+    Confidence score calculation (Part K.9):
+    0.5 * required_fields_present + 0.3 * work_type_matched_catalog + 0.2 * km_and_time_unambiguous
+    """
+    f_ratio = min(1.0, required_fields_count / max(1, total_required_fields))
+    w_score = 1.0 if work_type_matched else 0.0
+    u_score = 1.0 if km_and_time_unambiguous else 0.0
+    score = (0.5 * f_ratio) + (0.3 * w_score) + (0.2 * u_score)
+    return round(score, 2)
+
+
+def normalize_train_table(
+    table: List[List[str]],
+    source_filename: str
+) -> List[TrainMovement]:
+    """
+    Part D: Normalizes train movement tables.
+    Train headers (case-insensitive):
+    - train_id|train no|id
+    - corridor|section|route|line
+    - departure_time|dep|from|start_time
+    - arrival_time|arr|to|end_time
+    - km_start|km_from
+    - km_end|km_to
+    - train_type|type
+    """
+    if len(table) < 2:
+        return []
+
+    header = [c.lower().strip() for c in table[0]]
+    col_map = {}
+    for idx, col in enumerate(header):
+        c = col.strip().lower()
+        if any(k == c or k in c for k in ["train_id", "train no", "train_no", "train number", "id"]):
+            col_map["train_id"] = idx
+        elif any(k == c or k in c for k in ["corridor", "section", "route", "line"]):
+            col_map["corridor"] = idx
+        elif any(k == c or k in c for k in ["departure_time", "dep", "departure", "from_time", "start_time"]):
+            col_map["dep"] = idx
+        elif any(k == c or k in c for k in ["arrival_time", "arr", "arrival", "to_time", "end_time"]):
+            col_map["arr"] = idx
+        elif any(k == c or k in c for k in ["km_start", "km_from", "from_km", "start_km"]):
+            col_map["km_start"] = idx
+        elif any(k == c or k in c for k in ["km_end", "km_to", "to_km", "end_km"]):
+            col_map["km_end"] = idx
+        elif any(k == c or k in c for k in ["km", "chainage"]):
+            col_map["km_range"] = idx
+        elif any(k == c or k in c for k in ["train_type", "type", "category"]):
+            col_map["type"] = idx
+
+    trains = []
+    base_date = date.today() + timedelta(days=1)
+
+    for row in table[1:]:
+        if not any(c.strip() for c in row):
+            continue
+
+        def get_val(key: str) -> str:
+            if key in col_map and col_map[key] < len(row):
+                return str(row[col_map[key]]).strip()
+            return ""
+
+        tid = get_val("train_id") or f"T-{uuid.uuid4().hex[:4].upper()}"
+        corridor = get_val("corridor") or "NDLS-GZB"
+        t_type = get_val("type") or "Express"
+
+        k_s, k_e = 0.0, 500.0
+        if "km_start" in col_map and "km_end" in col_map:
+            try:
+                k_s = float(re.sub(r"[^\d.]", "", get_val("km_start")))
+                k_e = float(re.sub(r"[^\d.]", "", get_val("km_end")))
+            except Exception:
+                pass
+        elif "km_range" in col_map:
+            k1, k2 = parse_km_range_robust(get_val("km_range"))
+            if k1 is not None and k2 is not None:
+                k_s, k_e = k1, k2
+
+        dep = parse_datetime_flexible(get_val("dep"), base_date)
+        arr = parse_datetime_flexible(get_val("arr"), base_date)
+
+        if not dep:
+            dep = datetime.combine(base_date, datetime.min.time(), tzinfo=APP_TIMEZONE) + timedelta(hours=6)
+        if not arr:
+            arr = dep + timedelta(hours=2)
+        elif arr < dep:
+            arr = arr + timedelta(days=1)
+
+        trains.append(TrainMovement(
+            train_id=tid,
+            corridor=corridor,
+            departure_time=dep,
+            arrival_time=arr,
+            km_start=min(k_s, k_e),
+            km_end=max(k_s, k_e),
+            train_type=t_type,
+            source_document=source_filename
+        ))
+
+    return trains
 
 
 def normalize_table_data(
@@ -323,6 +426,7 @@ def normalize_table_data(
         resources = extract_resources(f"{res_str} {work_str}")
         isolation = get_col("isolation") or ("Power Block Required" if dept == DepartmentEnum.ELECTRICAL else "None")
 
+        # Validation & Sanity checks
         missing = []
         if not corridor:
             missing.append("corridor")
@@ -339,18 +443,38 @@ def normalize_table_data(
         if prio_flagged:
             missing.append("priority_review")
 
-        status = RequestStatusEnum.NEEDS_REVIEW if missing else RequestStatusEnum.CONFIRMED
-
+        # KM Sanity check per Part K.9: km_end - km_start > 100 -> Needs-Review
         f_km_s = km_s if km_s is not None else 0.0
         f_km_e = km_e if km_e is not None else 1.0
+        if abs(f_km_e - f_km_s) > 100.0:
+            missing.append("km_span_exceeds_100km")
+
+        # Work type catalog match check per Part D
+        cat, _, cat_score = classify_work_type(work_str)
+        if cat is None:
+            missing.append("unmatched_work_type")
+
+        status = RequestStatusEnum.NEEDS_REVIEW if missing else RequestStatusEnum.CONFIRMED
+
         f_corridor = corridor if corridor else "UNSPECIFIED-CORRIDOR"
         f_duration = duration if duration is not None and duration > 0 else 120
         f_t_start = t_start if t_start is not None else datetime.combine(row_date, datetime.min.time(), tzinfo=APP_TIMEZONE) + timedelta(hours=1)
         f_t_end = t_end if t_end is not None else f_t_start + timedelta(minutes=f_duration)
 
+        # Dedicated confidence_score column per K.9
+        total_req_fields = 6
+        present_fields = total_req_fields - len([m for m in missing if m in ["corridor", "km_start", "km_end", "duration_minutes", "earliest_start", "latest_end"]])
+        conf_score = compute_confidence_score(
+            required_fields_count=present_fields,
+            total_required_fields=total_req_fields,
+            work_type_matched=(cat is not None),
+            km_and_time_unambiguous=(abs(f_km_e - f_km_s) <= 100.0 and f_duration > 0 and t_start is not None)
+        )
+
         req = MaintenanceRequest(
             request_id=req_id,
             application_id=application_id,
+            document_type="maintenance",
             department=dept.value,
             corridor=f_corridor,
             km_start=f_km_s,
@@ -370,7 +494,8 @@ def normalize_table_data(
             status=status,
             source_document=source_filename,
             missing_fields=missing,
-            validation_notes=f"Missing: {', '.join(missing)}" if missing else "Extracted successfully from structured table"
+            confidence_score=conf_score,
+            validation_notes=f"Missing/Flagged: {', '.join(missing)}" if missing else "Extracted successfully from structured table"
         )
         results.append(req)
 
@@ -446,7 +571,12 @@ def normalize_prose_text(
         isolation = "Power Block (OHE)" if ("power block" in chunk_clean.lower() or dept == DepartmentEnum.ELECTRICAL) else "None"
 
         work_type = "Track & Asset Maintenance"
-        for candidate in ["Rail Grinding", "Track Tamping", "Ballast Cleaning", "OHE Catenary Inspection", "Point Machine Replacement", "Track Circuit Testing", "Bridge Girder Inspection", "Turnout Overhaul", "Insulator Replacement"]:
+        for candidate in [
+            "Rail renewal/replacement", "Track/rail repair & welding", "Sleeper replacement",
+            "Ballast work (tamping/screening)", "Points & crossing maintenance", "Point machine maintenance/repair",
+            "Track circuit testing & calibration", "Trackside signal mast/aspect maintenance",
+            "OHE replacement/repair", "Bridge/tunnel routine inspection"
+        ]:
             if re.search(r"\b" + re.escape(candidate) + r"\b", chunk_clean, re.IGNORECASE):
                 work_type = candidate
                 break
@@ -473,18 +603,35 @@ def normalize_prose_text(
         if prio_flagged:
             missing.append("priority_review")
 
-        status = RequestStatusEnum.NEEDS_REVIEW if missing else RequestStatusEnum.CONFIRMED
-
         f_km_s = km_s if km_s is not None else 0.0
         f_km_e = km_e if km_e is not None else 1.0
+        if abs(f_km_e - f_km_s) > 100.0:
+            missing.append("km_span_exceeds_100km")
+
+        cat, _, _ = classify_work_type(work_type)
+        if cat is None:
+            missing.append("unmatched_work_type")
+
+        status = RequestStatusEnum.NEEDS_REVIEW if missing else RequestStatusEnum.CONFIRMED
+
         f_corridor = corridor if corridor else "UNSPECIFIED-CORRIDOR"
         f_duration = duration if duration is not None and duration > 0 else 120
         f_t_start = t_start if t_start is not None else datetime.combine(base_date, datetime.min.time(), tzinfo=APP_TIMEZONE) + timedelta(hours=1)
         f_t_end = t_end if t_end is not None else f_t_start + timedelta(minutes=f_duration)
 
+        total_req_fields = 6
+        present_fields = total_req_fields - len([m for m in missing if m in ["corridor", "km_start", "km_end", "duration_minutes", "earliest_start", "latest_end"]])
+        conf_score = compute_confidence_score(
+            required_fields_count=present_fields,
+            total_required_fields=total_req_fields,
+            work_type_matched=(cat is not None),
+            km_and_time_unambiguous=(abs(f_km_e - f_km_s) <= 100.0 and f_duration > 0 and t_start is not None)
+        )
+
         req = MaintenanceRequest(
             request_id=f"REQ-{uuid.uuid4().hex[:6].upper()}",
             application_id=application_id,
+            document_type="maintenance",
             department=dept.value,
             corridor=f_corridor,
             km_start=f_km_s,
@@ -504,19 +651,47 @@ def normalize_prose_text(
             status=status,
             source_document=source_filename,
             missing_fields=missing,
-            validation_notes=f"Missing: {', '.join(missing)}" if missing else "Extracted from prose text successfully"
+            confidence_score=conf_score,
+            validation_notes=f"Missing/Flagged: {', '.join(missing)}" if missing else "Extracted from prose text successfully"
         )
         requests.append(req)
 
     return requests, trains
 
 
-def process_document_content(doc: DocumentContent, doc_type: Optional[str] = None) -> IngestResponse:
-    application_id = generate_application_id()   # <-- ADD THIS LINE
+def process_document_content(doc: DocumentContent, doc_type: str = "request") -> IngestResponse:
+    """
+    Part D: Processes document content based on doc_type ('request' | 'train_movement').
+    """
+    application_id = generate_application_id()
     all_requests: List[MaintenanceRequest] = []
     all_trains: List[TrainMovement] = []
     warnings: List[str] = []
 
+    if doc_type == "train_movement":
+        for table in doc.tables:
+            table_trains = normalize_train_table(table, doc.filename)
+            all_trains.extend(table_trains)
+
+        if not all_trains and len(doc.raw_text.strip()) > 20:
+            _, prose_trains = normalize_prose_text(doc.raw_text, doc.filename, application_id)
+            all_trains.extend(prose_trains)
+
+        if not all_trains:
+            warnings.append(f"No train movements could be extracted from {doc.filename}. Check column headers.")
+
+        return IngestResponse(
+            application_id=application_id,
+            filename=doc.filename,
+            total_extracted=len(all_trains),
+            confirmed_count=len(all_trains),
+            needs_review_count=0,
+            candidate_requests=[],
+            detected_trains=all_trains,
+            warnings=warnings
+        )
+
+    # Default: doc_type == 'request'
     for table in doc.tables:
         table_reqs = normalize_table_data(table, doc.filename, application_id)
         all_requests.extend(table_reqs)

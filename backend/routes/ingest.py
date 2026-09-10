@@ -1,6 +1,8 @@
 """
 Ingestion API Endpoint: POST /api/v1/ingest
-Accepts PDF/DOCX/TXT file uploads, extracts requests, normalizes fields, assigns Application ID, and flags incomplete records.
+Accepts PDF/DOCX/TXT file uploads, extracts requests or train movements based on doc_type.
+Assigns unique Application ID (APP-YYYYMMDD-XXXXXX).
+No authentication (open API per Part C).
 """
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -14,10 +16,8 @@ from backend.models import (
     IngestResponse,
     DBMaintenanceRequest,
     DBTrainMovement,
-    DBUser,
     RequestStatusEnum,
 )
-from backend.auth import get_current_user
 from backend.ingestion.extractor import extract_document
 from backend.ingestion.normalizer import process_document_content
 
@@ -27,15 +27,13 @@ router = APIRouter(prefix="/api/v1", tags=["Ingestion"])
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest_document(
     file: UploadFile = File(...),
-    doc_type: Optional[str] = Query(None, enum=["request", "train_movement", "corridor_availability"]),
-    current_user: DBUser = Depends(get_current_user),
+    doc_type: str = Query("request", enum=["request", "train_movement"]),
     db: Session = Depends(get_db)
 ):
     """
-    Upload a maintenance work request document (PDF or DOCX).
+    Upload a maintenance work request or train movement document (PDF or DOCX).
     Assigns unique Application ID (APP-YYYYMMDD-XXXXXX).
-    Extracts text/tables, normalizes fields to canonical schema, and flags missing fields as Needs-Review.
-    The `doc_type` query parameter hints the classifier which kind of document is being uploaded.
+    Extracts text/tables, normalizes fields, and enters records with cycle_id = null.
     """
     try:
         content_bytes = await file.read()
@@ -43,10 +41,9 @@ async def ingest_document(
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         doc_content = extract_document(content_bytes, file.filename)
-        # Pass doc_type to the normalizer if provided
         ingest_res = process_document_content(doc_content, doc_type=doc_type)
 
-        # Persist extracted requests into database safely
+        # Persist extracted requests if doc_type is request
         seen_ids = set()
         for req in ingest_res.candidate_requests:
             clean_id = re.sub(r"\s+", "", str(req.request_id)).strip() if req.request_id else ""
@@ -64,6 +61,7 @@ async def ingest_document(
             existing = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == req.request_id).first()
             if existing:
                 existing.application_id = req.application_id or ingest_res.application_id
+                existing.document_type = "maintenance"
                 existing.department = str(req.department)
                 existing.corridor = req.corridor
                 existing.km_start = req.km_start
@@ -85,10 +83,13 @@ async def ingest_document(
                 existing.source_document = req.source_document
                 existing.missing_fields = req.missing_fields
                 existing.validation_notes = req.validation_notes
+                existing.confidence_score = req.confidence_score
             else:
                 db_req = DBMaintenanceRequest(
                     request_id=req.request_id,
                     application_id=req.application_id or ingest_res.application_id,
+                    cycle_id=None,
+                    document_type="maintenance",
                     department=str(req.department),
                     corridor=req.corridor,
                     km_start=req.km_start,
@@ -109,6 +110,7 @@ async def ingest_document(
                     status=req.status.value,
                     source_document=req.source_document,
                     missing_fields=req.missing_fields,
+                    confidence_score=req.confidence_score,
                     validation_notes=req.validation_notes
                 )
                 db.add(db_req)
@@ -129,7 +131,8 @@ async def ingest_document(
                     km_start=train.km_start,
                     km_end=train.km_end,
                     train_type=train.train_type,
-                    source_document=train.source_document
+                    source_document=train.source_document,
+                    cycle_id=None
                 )
                 db.add(db_train)
 

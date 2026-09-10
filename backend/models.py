@@ -1,11 +1,14 @@
 """
 Canonical Data Models, Pydantic Schemas, and SQLAlchemy Database Entities.
 All timestamps are timezone-aware (IST, Asia/Kolkata, UTC+5:30).
-Phase 2 Additions:
-- User Authentication (Roles: Planner, Operations, Approver)
+Phase 2 Final (v6):
+- Authentication removed
 - Application ID (APP-YYYYMMDD-XXXXXX)
 - Priority Schema (1=Emergency, 2=High Urgent, 3=Normal)
-- ProcessingCycle & EscalationEvent models
+- document_type and confidence_score columns on DBMaintenanceRequest
+- cycle_id on DBMaintenanceRequest and DBTrainMovement
+- ProcessingCycle with status (Active | Approved | Rejected | Archived)
+- DBApprovalAudit with cycle_id and report_url
 """
 import uuid
 import json
@@ -20,12 +23,6 @@ from sqlalchemy.orm import declarative_base, relationship
 from backend.config import APP_TIMEZONE, PRIORITY_MIN, PRIORITY_MAX
 
 Base = declarative_base()
-
-
-class UserRoleEnum(str, Enum):
-    PLANNER = "Planner"
-    OPERATIONS = "Operations"
-    APPROVER = "Approver"
 
 
 class DepartmentEnum(str, Enum):
@@ -56,10 +53,13 @@ class RequestStatusEnum(str, Enum):
 
 class ConflictTypeEnum(str, Enum):
     SPATIAL_TIME_KM = "SpatialTimeKM"
-    RESOURCE_OVERLAP = "ResourceOverlap"
-    TRAIN_MOVEMENT_CONFLICT = "TrainMovementConflict"
-    DEPARTMENT_INCOMPATIBILITY = "DepartmentIncompatibility"
-    SAME_ASSET_HARD_CLASH = "SameAssetHardClash"
+    RESOURCE = "Resource"
+    TRAIN_MOVEMENT = "TrainMovement"
+    COMPATIBILITY = "Compatibility"
+    SAME_ASSET_CLASH = "SameAssetClash"
+    COMPETING_EMERGENCY = "CompetingEmergency"
+    RESOURCE_OVERLAP = "Resource"
+    TRAIN_MOVEMENT_CONFLICT = "TrainMovement"
 
 
 class PlanStatusEnum(str, Enum):
@@ -68,40 +68,12 @@ class PlanStatusEnum(str, Enum):
     REJECTED = "Rejected"
 
 
-# ==========================================
-# Authentication Pydantic Schemas
-# ==========================================
+class CycleStatusEnum(str, Enum):
+    ACTIVE = "Active"
+    APPROVED = "Approved"
+    REJECTED = "Rejected"
+    ARCHIVED = "Archived"
 
-class UserBase(BaseModel):
-    username: str
-    role: UserRoleEnum = UserRoleEnum.PLANNER
-    department: str = "Engineering"
-
-
-class UserCreate(UserBase):
-    password: str
-
-
-class UserOut(UserBase):
-    id: int
-    created_at: Optional[datetime] = None
-    model_config = ConfigDict(from_attributes=True)
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: UserOut
-
-
-# ==========================================
-# Maintenance Request Pydantic Schemas
-# ==========================================
 
 def generate_application_id() -> str:
     now_str = datetime.now(APP_TIMEZONE).strftime("%Y%m%d")
@@ -109,9 +81,15 @@ def generate_application_id() -> str:
     return f"APP-{now_str}-{rand_hex}"
 
 
+# ==========================================
+# Maintenance Request Pydantic Schemas
+# ==========================================
+
 class MaintenanceRequestBase(BaseModel):
     request_id: str = Field(default_factory=lambda: f"REQ-{uuid.uuid4().hex[:6].upper()}")
     application_id: Optional[str] = Field(default_factory=generate_application_id)
+    cycle_id: Optional[str] = None
+    document_type: str = "maintenance"
     department: str = "Engineering"
     corridor: str
     km_start: float
@@ -133,6 +111,7 @@ class MaintenanceRequestBase(BaseModel):
     source_document: str = "manual_entry"
     missing_fields: List[str] = Field(default_factory=list)
     validation_notes: Optional[str] = None
+    confidence_score: Optional[float] = None
     retry_count: int = Field(default=0, ge=0)
 
     @field_validator("earliest_start", "latest_end", mode="before")
@@ -152,15 +131,16 @@ class MaintenanceRequestBase(BaseModel):
 
     @field_validator("priority")
     def validate_priority_range(cls, v):
-        # Priority should be 1, 2, or 3. If above 3, normalize or flag
         if v not in (1, 2, 3):
-            return 3  # Default to Normal if out of range, flagged in validation notes
+            return 3
         return v
 
 
 class MaintenanceRequestCreate(BaseModel):
     request_id: Optional[str] = None
     application_id: Optional[str] = None
+    cycle_id: Optional[str] = None
+    document_type: str = "maintenance"
     department: str
     corridor: str
     km_start: float
@@ -180,6 +160,7 @@ class MaintenanceRequestCreate(BaseModel):
     dependencies: List[str] = Field(default_factory=list)
     status: RequestStatusEnum = RequestStatusEnum.CONFIRMED
     source_document: str = "manual_entry"
+    confidence_score: Optional[float] = None
 
 
 class MaintenanceRequestUpdate(BaseModel):
@@ -202,6 +183,7 @@ class MaintenanceRequestUpdate(BaseModel):
     dependencies: Optional[List[str]] = None
     status: Optional[RequestStatusEnum] = None
     validation_notes: Optional[str] = None
+    confidence_score: Optional[float] = None
     retry_count: Optional[int] = Field(default=None, ge=0)
 
 
@@ -215,6 +197,9 @@ class MaintenanceRequest(MaintenanceRequestBase):
 
 class TrainMovement(BaseModel):
     train_id: str
+    train_number: Optional[str] = None
+    train_name: Optional[str] = None
+    speed_kmh: Optional[float] = None
     corridor: str
     departure_time: datetime
     arrival_time: datetime
@@ -222,6 +207,7 @@ class TrainMovement(BaseModel):
     km_end: float
     train_type: str = "Express"
     source_document: Optional[str] = "manual"
+    cycle_id: Optional[str] = None
 
     @field_validator("departure_time", "arrival_time", mode="before")
     def ensure_tz(cls, v):
@@ -238,6 +224,7 @@ class TrainMovement(BaseModel):
 
 class ConflictDetail(BaseModel):
     conflict_id: str = Field(default_factory=lambda: f"CONF-{uuid.uuid4().hex[:6].upper()}")
+    cycle_id: Optional[str] = None
     conflict_type: ConflictTypeEnum
     severity: str = "Hard"  # Hard, Warning, ReviewRequired
     request_ids: List[str]
@@ -271,11 +258,10 @@ class MaintenanceBlock(BaseModel):
 
 
 class RequestDecision(BaseModel):
-    """Deterministic per-request output from batch processing engine."""
     request_id: str
     application_id: Optional[str] = None
     final_status: str
-    disconnection_required: bool
+    disconnection_required: Optional[bool] = None
     priority: int
     bundle_id: Optional[str] = None
     bundle_members: List[str] = Field(default_factory=list)
@@ -286,6 +272,7 @@ class RequestDecision(BaseModel):
 
 class SchedulePlan(BaseModel):
     schedule_id: str = Field(default_factory=lambda: f"SCHED-{uuid.uuid4().hex[:8].upper()}")
+    cycle_id: Optional[str] = None
     plan_name: str
     is_recommended: bool = True
     blocks: List[MaintenanceBlock] = Field(default_factory=list)
@@ -308,7 +295,7 @@ class SchedulePlan(BaseModel):
 class ApprovalRequest(BaseModel):
     role: str = Field(default="Chief Controller", description="Planner / Operations / Approver")
     user_name: str = Field(default="Senior Traffic Controller")
-    notes: Optional[str] = "Approved after reviewing corridor availability and bundling explanations."
+    notes: Optional[str] = "Approved after reviewing corridor safety and bundling explanations."
 
 
 class RejectionRequest(BaseModel):
@@ -334,23 +321,23 @@ class EscalationEvent(BaseModel):
     corridor: str
     reason: str
     escalated_at: datetime = Field(default_factory=lambda: datetime.now(APP_TIMEZONE))
-    status: str = "Pending"  # Pending, Acknowledged, Resolved
+    status: str = "Pending"
+
+
+class BulkDeleteRequest(BaseModel):
+    request_ids: List[str]
+
+
+class BulkDeleteResponse(BaseModel):
+    deleted: int
+    ids: List[str]
+    skipped: List[str]
+    reason: Optional[str] = None
 
 
 # ==========================================
 # SQLAlchemy Persistence Tables
 # ==========================================
-
-class DBUser(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(64), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    role = Column(String(32), nullable=False, default="Planner")
-    department = Column(String(64), nullable=False, default="Engineering")
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
-
 
 class DBMaintenanceRequest(Base):
     __tablename__ = "maintenance_requests"
@@ -358,6 +345,8 @@ class DBMaintenanceRequest(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     request_id = Column(String(64), unique=True, index=True, nullable=False)
     application_id = Column(String(64), index=True, nullable=True)
+    cycle_id = Column(String(64), index=True, nullable=True)
+    document_type = Column(String(32), nullable=False, default="maintenance")
     department = Column(String(32), nullable=False)
     corridor = Column(String(64), index=True, nullable=False)
     km_start = Column(Float, nullable=False)
@@ -379,16 +368,21 @@ class DBMaintenanceRequest(Base):
     source_document = Column(String(255), nullable=False, default="manual_entry")
     missing_fields = Column(JSON, nullable=False, default=list)
     validation_notes = Column(Text, nullable=True)
+    confidence_score = Column(Float, nullable=True)
     retry_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE), onupdate=lambda: datetime.now(APP_TIMEZONE))
     isolated_at = Column(DateTime(timezone=True), nullable=True)
+
 
 class DBTrainMovement(Base):
     __tablename__ = "train_movements"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     train_id = Column(String(64), index=True, nullable=False)
+    train_number = Column(String(32), nullable=True)
+    train_name = Column(String(128), nullable=True)
+    speed_kmh = Column(Float, nullable=True)
     corridor = Column(String(64), index=True, nullable=False)
     departure_time = Column(DateTime(timezone=True), nullable=False)
     arrival_time = Column(DateTime(timezone=True), nullable=False)
@@ -396,6 +390,7 @@ class DBTrainMovement(Base):
     km_end = Column(Float, nullable=False)
     train_type = Column(String(64), nullable=False, default="Express")
     source_document = Column(String(255), nullable=True)
+    cycle_id = Column(String(64), index=True, nullable=True)
 
 
 class DBSchedulePlan(Base):
@@ -403,10 +398,11 @@ class DBSchedulePlan(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     schedule_id = Column(String(64), unique=True, index=True, nullable=False)
+    cycle_id = Column(String(64), index=True, nullable=True)
     plan_name = Column(String(128), nullable=False)
     is_recommended = Column(Boolean, default=True)
     status = Column(String(32), default="Generated")
-    plan_data = Column(JSON, nullable=False)  # Full JSON payload of SchedulePlan
+    plan_data = Column(JSON, nullable=False)
     approved_by = Column(String(128), nullable=True)
     approval_role = Column(String(128), nullable=True)
     approval_timestamp = Column(DateTime(timezone=True), nullable=True)
@@ -420,11 +416,13 @@ class DBApprovalAudit(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     schedule_id = Column(String(64), index=True, nullable=False)
     application_id = Column(String(64), index=True, nullable=True)
-    action = Column(String(32), nullable=False)  # APPROVED or REJECTED
+    cycle_id = Column(String(64), index=True, nullable=True)
+    action = Column(String(32), nullable=False)
     role = Column(String(128), nullable=False)
     user_name = Column(String(128), nullable=False)
     notes = Column(Text, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
+    report_url = Column(String(255), nullable=True)
 
 
 class DBProcessingCycle(Base):
@@ -432,6 +430,7 @@ class DBProcessingCycle(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     cycle_id = Column(String(64), unique=True, index=True, nullable=False)
+    status = Column(String(32), nullable=False, default="Active")  # Active, Approved, Rejected, Archived
     total_requests = Column(Integer, nullable=False, default=0)
     approved_count = Column(Integer, nullable=False, default=0)
     deferred_count = Column(Integer, nullable=False, default=0)

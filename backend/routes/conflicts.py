@@ -1,6 +1,6 @@
 """
 Conflict Detection API Endpoint: POST /api/v1/conflicts/check
-Evaluates confirmed requests and train movements against exact conflict specifications.
+Evaluates confirmed requests and train movements against exact conflict specifications (no auth).
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -13,10 +13,8 @@ from backend.models import (
     ConflictDetail,
     DBMaintenanceRequest,
     DBTrainMovement,
-    DBUser,
     RequestStatusEnum,
 )
-from backend.auth import get_current_user
 from backend.routes.requests import db_to_pydantic
 from backend.engine.conflicts import detect_all_conflicts
 
@@ -26,11 +24,10 @@ router = APIRouter(prefix="/api/v1/conflicts", tags=["Conflicts"])
 @router.post("/check", response_model=List[ConflictDetail])
 def check_conflicts(
     request_ids: Optional[List[str]] = None,
-    current_user: DBUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Runs multi-dimensional conflict detection across confirmed requests and known train movements.
+    Runs multi-dimensional conflict detection across requests and known train movements.
     Detects Spatial-Time-KM overlap, resource contention, live train path collisions, and Rule C same-asset clashes.
     """
     query = db.query(DBMaintenanceRequest)
@@ -40,7 +37,8 @@ def check_conflicts(
         query = query.filter(DBMaintenanceRequest.status.in_([
             RequestStatusEnum.CONFIRMED.value,
             RequestStatusEnum.INGESTED.value,
-            RequestStatusEnum.OPTIMIZED.value
+            RequestStatusEnum.OPTIMIZED.value,
+            RequestStatusEnum.DEFERRED.value
         ]))
 
     db_reqs = query.all()

@@ -14,7 +14,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { ApprovalHistoryItem } from '../types';
-import { fetchApprovalHistory, downloadExport } from '../services/api';
+import { fetchApprovalHistory, downloadExport, downloadApprovalReport } from '../services/api';
 
 export const ApprovalHistoryPortal: React.FC = () => {
   const [history, setHistory] = useState<ApprovalHistoryItem[]>([]);
@@ -24,6 +24,7 @@ export const ApprovalHistoryPortal: React.FC = () => {
   const [applicationId, setApplicationId] = useState('');
   const [corridor, setCorridor] = useState('');
   const [isExporting, setIsExporting] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   const loadHistory = async () => {
     setLoading(true);
@@ -54,6 +55,17 @@ export const ApprovalHistoryPortal: React.FC = () => {
       alert(err.message || 'Export failed');
     } finally {
       setIsExporting(null);
+    }
+  };
+
+  const handleDownloadSingleReport = async (scheduleId: string) => {
+    setDownloadingId(scheduleId);
+    try {
+      await downloadApprovalReport(scheduleId);
+    } catch (err: any) {
+      alert(err.message || 'Failed to download approval report PDF');
+    } finally {
+      setDownloadingId(null);
     }
   };
 
@@ -174,12 +186,13 @@ export const ApprovalHistoryPortal: React.FC = () => {
                 <th className="py-3.5 px-4">Authority & Role</th>
                 <th className="py-3.5 px-4">Scope & Corridors</th>
                 <th className="py-3.5 px-4">Controller Remarks</th>
+                <th className="py-3.5 px-4 text-right">Report</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-800">
               {history.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-400 font-medium">
+                  <td colSpan={8} className="py-12 text-center text-slate-400 font-medium">
                     No approval audit history records match your search criteria.
                   </td>
                 </tr>
@@ -242,6 +255,19 @@ export const ApprovalHistoryPortal: React.FC = () => {
                     {/* Notes */}
                     <td className="py-3 px-4 text-slate-600 max-w-[280px]">
                       {item.notes || '—'}
+                    </td>
+
+                    {/* Download Report Button */}
+                    <td className="py-3 px-4 text-right">
+                      <button
+                        onClick={() => handleDownloadSingleReport(item.schedule_id)}
+                        disabled={downloadingId === item.schedule_id}
+                        className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-navy-800 text-[11px] font-bold rounded-lg border border-slate-300 flex items-center gap-1 ml-auto transition"
+                        title="Download Part F Approval Report PDF"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>{downloadingId === item.schedule_id ? '...' : 'PDF'}</span>
+                      </button>
                     </td>
                   </tr>
                 ))

@@ -10,6 +10,7 @@ Phase 2 Final (v6) Updates:
 - KM Sanity check: km_end - km_start > 100 -> Needs-Review
 - Dedicated confidence_score calculation per K.9
 """
+import os
 import re
 import uuid
 from datetime import datetime, date, timedelta

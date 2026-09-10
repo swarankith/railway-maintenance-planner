@@ -3,7 +3,6 @@ import {
   Calendar,
   Clock,
   MapPin,
-  Sparkles,
   Layers,
   Train,
   CheckCircle2,

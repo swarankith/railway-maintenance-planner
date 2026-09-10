@@ -219,15 +219,82 @@ def compute_confidence_score(
     return round(score, 2)
 
 
+def extract_corridor_from_string(text: Any) -> Optional[str]:
+    """
+    Robustly extracts railway corridor or station pair from arbitrary text or cell.
+    Supports:
+    - 2-6 letter uppercase or title-case codes: NDLS-GZB, MMCT-BVI, HWH-KGP, BVI-ST, AGC-JHS, MAS-GDR, SBC-MYS
+    - Words with hyphens/slashes: Mumbai-Surat, Delhi-Ghaziabad, Howrah-Kharagpur
+    - Words separated by 'to' or '/': NDLS to CNB, MMCT to BVI, NDLS/GZB
+    """
+    if not text:
+        return None
+    clean = " ".join(str(text).split()).strip()
+
+    # 1. Explicit keyword: Corridor: XXX-YYY or Section: XXX-YYY
+    m_key = re.search(r"(?:corridor|section|route|line|sector)\s*[:\s-]\s*([A-Za-z0-9\-/\s–]{3,25}?)(?:\n|,|\.|\s*between|\s*from|\s*km|\s*dep|\s*arr|$)", clean, re.IGNORECASE)
+    if m_key:
+        cand = re.sub(r"\s+", "", m_key.group(1)).replace("–", "-").replace("/", "-").strip("-").upper()
+        if "-" in cand and len(cand) >= 4:
+            return cand
+
+    # 2. Station code pair: e.g. NDLS-GZB, MMCT-BVI, BVI-ST, HWH-KGP
+    m_pair = re.search(r"\b([A-Za-z]{2,6}\s*[-–\/]\s*[A-Za-z]{2,6})\b", clean)
+    if m_pair:
+        cand = re.sub(r"\s+", "", m_pair.group(1)).replace("–", "-").replace("/", "-").strip("-").upper()
+        non_corridors = ["P-WAY", "S-T", "KM-SPAN", "SL-NO", "JOB-ID", "REQ-ID", "W35", "W-35"]
+        if cand not in non_corridors and not any(cand.startswith(pfx) for pfx in ["JOB-", "REQ-", "APP-", "TASK-", "WO-"]):
+            if "-" in cand and len(cand) >= 4:
+                return cand
+
+    # 3. 'From X to Y' or 'X to Y'
+    m_to = re.search(r"\b([A-Za-z]{2,12})\s+(?:to|-|–)\s+([A-Za-z]{2,12})\b", clean, re.IGNORECASE)
+    if m_to:
+        s1, s2 = m_to.group(1).upper(), m_to.group(2).upper()
+        if s1 not in ["KM", "FROM", "UP", "DN", "MIN", "HOURS", "DEP", "ARR"] and s2 not in ["KM", "TO", "UP", "DN", "MIN", "HOURS", "DEP", "ARR"]:
+            return f"{s1}-{s2}"
+
+    # 4. Long station names with hyphen: e.g. Mumbai-Surat, Delhi-Kanpur
+    m_names = re.search(r"\b([A-Z][a-z]{2,15})\s*[-–]\s*([A-Z][a-z]{2,15})\b", clean)
+    if m_names:
+        return f"{m_names.group(1).upper()}-{m_names.group(2).upper()}"
+
+    return None
+
+
+def detect_document_corridor(raw_text: str, filename: str = "") -> Optional[str]:
+    """Scans top of document, title, and filename to find default dominant corridor."""
+    header_sample = f"{filename} {raw_text[:2500]}"
+
+    # Check for explicit keywords first
+    m = re.search(r"(?:corridor|section|route|line)\s*[:\s-]\s*([A-Za-z0-9\-/\s–]{3,25}?)(?:\n|,|\.|\s*between|\s*from|\s*km|$)", header_sample, re.IGNORECASE)
+    if m:
+        cand = re.sub(r"\s+", "", m.group(1)).replace("–", "-").replace("/", "-").strip("-").upper()
+        if "-" in cand and len(cand) >= 4:
+            return cand
+
+    # Find all station pairs
+    pairs = re.findall(r"\b([A-Za-z]{2,6}\s*[-–\/]\s*[A-Za-z]{2,6})\b", header_sample)
+    for p in pairs:
+        cand = re.sub(r"\s+", "", p).replace("–", "-").replace("/", "-").strip("-").upper()
+        if cand not in ["P-WAY", "S-T", "KM-SPAN", "SL-NO", "JOB-ID", "REQ-ID", "W35", "W-35"] and not any(cand.startswith(pfx) for pfx in ["JOB-", "REQ-", "APP-", "TASK-", "WO-"]):
+            if "-" in cand and len(cand) >= 4:
+                return cand
+
+    return None
+
+
 def normalize_train_table(
     table: List[List[str]],
-    source_filename: str
+    source_filename: str,
+    doc_corridor: Optional[str] = None
 ) -> List[TrainMovement]:
     """
     Part D: Normalizes train movement tables.
     Train headers (case-insensitive):
     - train_id|train no|id
     - corridor|section|route|line
+    - from_stn / to_stn (or From / To)
     - departure_time|dep|from|start_time
     - arrival_time|arr|to|end_time
     - km_start|km_from
@@ -248,6 +315,10 @@ def normalize_train_table(
                 col_map["train_id"] = idx
         elif any(k in c for k in ["corridor", "section", "route", "line", "block_section", "block section", "sector"]):
             col_map["corridor"] = idx
+        elif any(k == c or k in c for k in ["from_station", "origin", "source", "source_station", "src", "station_from", "station from"]):
+            col_map["from_stn"] = idx
+        elif any(k == c or k in c for k in ["to_station", "destination", "dest", "dest_station", "station_to", "station to"]):
+            col_map["to_stn"] = idx
         elif any(k in c for k in ["departure_time", "dep_time", "departure", "dep", "start_time", "from_time", "origin time"]):
             col_map["dep"] = idx
         elif any(k in c for k in ["arrival_time", "arr_time", "arrival", "arr", "end_time", "to_time", "dest time"]):
@@ -267,6 +338,14 @@ def normalize_train_table(
         elif any(k in c for k in ["train_type", "type", "category", "class"]):
             col_map["type"] = idx
 
+    # If From and To columns exist as standalone headers
+    if "from_stn" not in col_map and "to_stn" not in col_map:
+        from_idx = [i for i, c in enumerate(header) if c in ["from", "origin", "source"]]
+        to_idx = [i for i, c in enumerate(header) if c in ["to", "destination", "dest"]]
+        if from_idx and to_idx:
+            col_map["from_stn"] = from_idx[0]
+            col_map["to_stn"] = to_idx[0]
+
     trains = []
     base_date = date.today() + timedelta(days=1)
 
@@ -285,15 +364,30 @@ def normalize_train_table(
         t_type = get_val("type") or "Express"
         raw_speed = get_val("speed")
 
-        # If corridor not found from mapped column, scan cells
+        # 1. Check if From/To columns provide corridor
+        if not corridor and "from_stn" in col_map and "to_stn" in col_map:
+            f_stn = get_val("from_stn")
+            t_stn = get_val("to_stn")
+            if f_stn and t_stn:
+                corridor = f"{f_stn}-{t_stn}".replace(" ", "").upper()
+
+        # 2. Check all cells in row for a corridor/station pair
         if not corridor:
             for cell in row:
-                cm = re.search(r"\b([A-Z]{2,5}\s*[-–\/]\s*[A-Z]{2,5})\b", str(cell).upper())
-                if cm:
-                    corridor = re.sub(r"\s+", "", cm.group(1)).replace("–", "-")
+                c_cand = extract_corridor_from_string(str(cell))
+                if c_cand:
+                    corridor = c_cand
                     break
+
+        # 3. Fallback to document dominant corridor
+        if not corridor and doc_corridor:
+            corridor = doc_corridor
+
+        # 4. Fallback to clean default derived from document if still unspecified
         if not corridor:
-            corridor = "NDLS-GZB"
+            clean_fn = re.sub(r"[_\-]+", " ", os.path.splitext(source_filename)[0]).upper()
+            fn_corridor = extract_corridor_from_string(clean_fn)
+            corridor = fn_corridor if fn_corridor else "SECTION-1"
 
         # Clean train id and number
         t_num = None
@@ -392,7 +486,11 @@ def normalize_train_table(
     return trains
 
 
-def extract_trains_from_text(raw_text: str, source_filename: str) -> List[TrainMovement]:
+def extract_trains_from_text(
+    raw_text: str,
+    source_filename: str,
+    doc_corridor: Optional[str] = None
+) -> List[TrainMovement]:
     """
     Robust fallback to extract Train Movements line-by-line from unstructured text,
     PDF text streams, circulars, or CSV logs.
@@ -402,10 +500,11 @@ def extract_trains_from_text(raw_text: str, source_filename: str) -> List[TrainM
     seen = set()
 
     # Pattern 1: Narrative / Circular format (e.g., Note 45, Section 2, or Memo)
-    p1 = r"(?:train|express|freight|mail|passenger)\s*(?:no\.?|#)?\s*([A-Za-z0-9\s\-]+?)\s*(?:on\s*(?:corridor\s*)?([A-Za-z0-9\-]+))?\s*(?:from|dep|departing)?\s*(\d{1,2}:\d{2})\s*(?:to|arr|arriving|-)\s*(\d{1,2}:\d{2})\s*(?:\(?km\s*(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\)?)?"
+    p1 = r"(?:train|express|freight|mail|passenger)\s*(?:no\.?|#)?\s*([A-Za-z0-9\s\-]+?)\s*(?:on\s*(?:corridor\s*)?([A-Za-z0-9\-–/]+))?\s*(?:from|dep|departing)?\s*(\d{1,2}:\d{2})\s*(?:to|arr|arriving|-)\s*(\d{1,2}:\d{2})\s*(?:\(?km\s*(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\)?)?"
     for m in re.finditer(p1, raw_text, re.IGNORECASE):
         tid = m.group(1).strip()
-        corr = m.group(2).strip() if m.group(2) else "NDLS-GZB"
+        matched_corr = extract_corridor_from_string(m.group(2)) if m.group(2) else None
+        corr = matched_corr or doc_corridor or "SECTION-1"
         dep = parse_datetime_flexible(m.group(3), base_date)
         arr = parse_datetime_flexible(m.group(4), base_date)
         k1 = float(m.group(5)) if m.group(5) else 0.0
@@ -443,12 +542,12 @@ def extract_trains_from_text(raw_text: str, source_filename: str) -> List[TrainM
             continue
 
         num_m = re.search(r"\b(\d{4,5})\b", line_clean)
-        corr_m = re.search(r"\b([A-Z]{2,5}\s*[-–\/]\s*[A-Z]{2,5})\b", line_clean.upper())
+        line_corr = extract_corridor_from_string(line_clean)
         times = re.findall(r"\b(\d{1,2}:\d{2})\b", line_clean)
 
-        if (num_m or corr_m) and len(times) >= 2:
+        if (num_m or line_corr) and len(times) >= 2:
             t_num = num_m.group(1) if num_m else f"T-{len(trains)+1}"
-            corr = re.sub(r"\s+", "", corr_m.group(1)).replace("–", "-") if corr_m else "NDLS-GZB"
+            corr = line_corr or doc_corridor or "SECTION-1"
             dep = parse_datetime_flexible(times[0], base_date)
             arr = parse_datetime_flexible(times[1], base_date)
             k1, k2 = parse_km_range_robust(line_clean)
@@ -481,7 +580,8 @@ def extract_trains_from_text(raw_text: str, source_filename: str) -> List[TrainM
 def normalize_table_data(
     table: List[List[str]],
     source_filename: str,
-    application_id: Optional[str] = None
+    application_id: Optional[str] = None,
+    doc_corridor: Optional[str] = None
 ) -> List[MaintenanceRequest]:
     if application_id is None:
         application_id = generate_application_id()
@@ -492,8 +592,12 @@ def normalize_table_data(
     col_map = {}
     for idx, col in enumerate(header_row):
         c_clean = col.strip().lower()
-        if c_clean in ["corridor", "section", "route", "line", "block_section", "block section"]:
+        if c_clean in ["corridor", "section", "route", "line", "block_section", "block section", "sector"]:
             col_map["corridor"] = idx
+        elif any(k == c_clean or k in c_clean for k in ["from_station", "origin", "source", "source_station", "src", "station_from", "station from"]):
+            col_map["from_stn"] = idx
+        elif any(k == c_clean or k in c_clean for k in ["to_station", "destination", "dest", "dest_station", "station_to", "station to"]):
+            col_map["to_stn"] = idx
         elif c_clean in ["id", "job id", "job_id", "request id", "request_id", "req id", "req_id", "request no", "sl no", "sl_no", "item"]:
             col_map["id"] = idx
         elif any(k in c_clean for k in ["dept", "department", "branch", "discipline"]):
@@ -514,9 +618,9 @@ def normalize_table_data(
             col_map["block_type"] = idx
         elif any(k in c_clean for k in ["duration", "hours", "duration_mins", "time_req", "duration_minutes"]):
             col_map["duration"] = idx
-        elif c_clean in ["earliest", "start_time", "from_time", "start", "from"]:
+        elif c_clean in ["earliest", "start_time", "from_time", "start"]:
             col_map["start_time"] = idx
-        elif c_clean in ["latest", "end_time", "to_time", "end", "to"]:
+        elif c_clean in ["latest", "end_time", "to_time", "end"]:
             col_map["end_time"] = idx
         elif any(k in c_clean for k in ["window", "time_window", "slot", "timings", "permitted_window"]):
             col_map["time_window"] = idx
@@ -526,6 +630,14 @@ def normalize_table_data(
             col_map["resources"] = idx
         elif any(k in c_clean for k in ["isolation", "power_block", "traffic_block", "shadow"]):
             col_map["isolation"] = idx
+
+    # If From and To columns exist as standalone headers
+    if "from_stn" not in col_map and "to_stn" not in col_map:
+        from_idx = [i for i, c in enumerate(header_row) if c in ["from", "origin", "source"]]
+        to_idx = [i for i, c in enumerate(header_row) if c in ["to", "destination", "dest"]]
+        if from_idx and to_idx:
+            col_map["from_stn"] = from_idx[0]
+            col_map["to_stn"] = to_idx[0]
 
     results = []
     base_date = date.today() + timedelta(days=1)
@@ -544,6 +656,28 @@ def normalize_table_data(
         raw_id = get_col("id")
         req_id = re.sub(r"\s+", "", raw_id) if raw_id else f"REQ-{uuid.uuid4().hex[:6].upper()}"
         corridor = get_col("corridor")
+
+        # 1. From / To columns combination
+        if not corridor and "from_stn" in col_map and "to_stn" in col_map:
+            f_stn = get_col("from_stn")
+            t_stn = get_col("to_stn")
+            if f_stn and t_stn:
+                corridor = f"{f_stn}-{t_stn}".replace(" ", "").upper()
+
+        # 2. Check other cells in row for a corridor/station pair (only if no dedicated corridor column)
+        if not corridor and "corridor" not in col_map:
+            for idx, cell in enumerate(row):
+                if idx == col_map.get("id"):
+                    continue
+                c_cand = extract_corridor_from_string(str(cell))
+                if c_cand:
+                    corridor = c_cand
+                    break
+
+        # 3. Fallback to document dominant corridor (only if no dedicated corridor column)
+        if not corridor and "corridor" not in col_map and doc_corridor:
+            corridor = doc_corridor
+
         dept_str = get_col("dept")
         work_str = get_col("work_type") or "Track Maintenance"
         asset_str = get_col("asset") or "Track Infrastructure"
@@ -673,17 +807,19 @@ def normalize_table_data(
 def normalize_prose_text(
     raw_text: str,
     source_filename: str,
-    application_id: Optional[str] = None
+    application_id: Optional[str] = None,
+    doc_corridor: Optional[str] = None
 ) -> Tuple[List[MaintenanceRequest], List[TrainMovement]]:
     if application_id is None:
         application_id = generate_application_id()
     requests: List[MaintenanceRequest] = []
     trains: List[TrainMovement] = []
 
-    train_pattern = r"(?:train|express|freight|mail)\s*(?:no\.?|#)?\s*([A-Za-z0-9\s\-]+?)\s*on\s*(?:corridor\s*)?([A-Za-z0-9\-]+)\s*(?:from|dep|departing)?\s*(\d{1,2}:\d{2})\s*(?:to|arr|arriving)?\s*(\d{1,2}:\d{2})\s*(?:\(?km\s*(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\)?)?"
+    train_pattern = r"(?:train|express|freight|mail)\s*(?:no\.?|#)?\s*([A-Za-z0-9\s\-]+?)\s*on\s*(?:corridor\s*)?([A-Za-z0-9\-–/]+)\s*(?:from|dep|departing)?\s*(\d{1,2}:\d{2})\s*(?:to|arr|arriving)?\s*(\d{1,2}:\d{2})\s*(?:\(?km\s*(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\)?)?"
     for m in re.finditer(train_pattern, raw_text, re.IGNORECASE):
         t_id = m.group(1).strip()
-        corr = m.group(2).strip()
+        matched_corr = extract_corridor_from_string(m.group(2)) if m.group(2) else None
+        corr = matched_corr or doc_corridor or "SECTION-1"
         dep_str = m.group(3)
         arr_str = m.group(4)
         k1 = float(m.group(5)) if m.group(5) else 0.0
@@ -692,8 +828,13 @@ def normalize_prose_text(
         t_dep = parse_datetime_flexible(dep_str, base_d)
         t_arr = parse_datetime_flexible(arr_str, base_d)
         if t_dep and t_arr:
+            num_m = re.search(r"\b(\d{4,5})\b", t_id)
+            t_num = num_m.group(1) if num_m else t_id
             trains.append(TrainMovement(
                 train_id=f"Train {t_id}",
+                train_number=t_num,
+                train_name=t_id,
+                speed_kmh=110.0,
                 corridor=corr,
                 departure_time=t_dep,
                 arrival_time=t_arr,
@@ -714,14 +855,7 @@ def normalize_prose_text(
         if re.search(r"^railway\s*maintenance\s*plan|^daily\s*block\s*summary", chunk_clean, re.IGNORECASE) and len(chunk_clean) < 100:
             continue
 
-        corridor = None
-        corr_m = re.search(r"(?:corridor|section|route|line)\s*[:\s]\s*([A-Za-z0-9\-/\s]+?)(?:\n|,|\.|\s*between|\s*from)", chunk_clean, re.IGNORECASE)
-        if corr_m:
-            corridor = corr_m.group(1).strip()
-        else:
-            pair_m = re.search(r"\b([A-Z]{2,5}\s*[-–\/]\s*[A-Z]{2,5})\b", chunk_clean)
-            if pair_m:
-                corridor = re.sub(r"\s+", "", pair_m.group(1))
+        corridor = extract_corridor_from_string(chunk_clean) or doc_corridor
 
         km_s, km_e = parse_km_range_robust(chunk_clean)
         dept = detect_department(chunk_clean) or DepartmentEnum.ENGINEERING
@@ -742,6 +876,7 @@ def normalize_prose_text(
         for candidate in [
             "Rail renewal/replacement", "Track/rail repair & welding", "Sleeper replacement",
             "Ballast work (tamping/screening)", "Points & crossing maintenance", "Point machine maintenance/repair",
+            "Signalling cable testing", "OHE catenary wire adjustment", "OHE insulator replacement",
             "Track circuit testing & calibration", "Trackside signal mast/aspect maintenance",
             "OHE replacement/repair", "Bridge/tunnel routine inspection"
         ]:
@@ -797,7 +932,7 @@ def normalize_prose_text(
         )
 
         req = MaintenanceRequest(
-            request_id=f"REQ-{uuid.uuid4().hex[:6].upper()}",
+            request_id=f"REQ-PR-{uuid.uuid4().hex[:6].upper()}",
             application_id=application_id,
             document_type="maintenance",
             department=dept.value,
@@ -830,19 +965,21 @@ def normalize_prose_text(
 def process_document_content(doc: DocumentContent, doc_type: str = "request") -> IngestResponse:
     """
     Part D: Processes document content based on doc_type ('request' | 'train_movement').
+    Dynamically identifies corridor from document header and tables.
     """
     application_id = generate_application_id()
+    doc_corridor = detect_document_corridor(doc.raw_text, doc.filename)
     all_requests: List[MaintenanceRequest] = []
     all_trains: List[TrainMovement] = []
     warnings: List[str] = []
 
     if doc_type == "train_movement":
         for table in doc.tables:
-            table_trains = normalize_train_table(table, doc.filename)
+            table_trains = normalize_train_table(table, doc.filename, doc_corridor=doc_corridor)
             all_trains.extend(table_trains)
 
         # Robust extraction from raw text/prose lines
-        text_trains = extract_trains_from_text(doc.raw_text, doc.filename)
+        text_trains = extract_trains_from_text(doc.raw_text, doc.filename, doc_corridor=doc_corridor)
         for tt in text_trains:
             if not any(
                 t.train_id == tt.train_id or (
@@ -869,14 +1006,14 @@ def process_document_content(doc: DocumentContent, doc_type: str = "request") ->
 
     # Default: doc_type == 'request'
     for table in doc.tables:
-        table_reqs = normalize_table_data(table, doc.filename, application_id)
+        table_reqs = normalize_table_data(table, doc.filename, application_id, doc_corridor=doc_corridor)
         all_requests.extend(table_reqs)
 
     if not all_requests or len(doc.raw_text.strip()) > 50:
-        prose_reqs, prose_trains = normalize_prose_text(doc.raw_text, doc.filename, application_id)
+        prose_reqs, prose_trains = normalize_prose_text(doc.raw_text, doc.filename, application_id, doc_corridor=doc_corridor)
         all_trains.extend(prose_trains)
         # Also check extract_trains_from_text
-        text_trains = extract_trains_from_text(doc.raw_text, doc.filename)
+        text_trains = extract_trains_from_text(doc.raw_text, doc.filename, doc_corridor=doc_corridor)
         for tt in text_trains:
             if not any(t.train_id == tt.train_id for t in all_trains):
                 all_trains.append(tt)

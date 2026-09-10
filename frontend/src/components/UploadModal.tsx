@@ -18,7 +18,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { MaintenanceRequest, IngestResponse, TrainMovement, ActiveTab } from '../types';
-import { ingestDocument, confirmRequest, deleteRequest } from '../services/api';
+import { ingestDocument, confirmRequest, deleteRequest, clearAllTrains } from '../services/api';
 
 interface UploadModalProps {
   onIngestSuccess: () => void;
@@ -327,11 +327,28 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                 </p>
               </div>
             </div>
-            {eligibleTrains.length > 0 && (
-              <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                ✓ Ready for Engine Optimization
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {eligibleTrains.length > 0 && (
+                <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  ✓ Ready for Engine Optimization
+                </span>
+              )}
+              {trains.length > 0 && (
+                <button
+                  onClick={async () => {
+                    if (window.confirm(`Are you sure you want to clear all ${trains.length} scheduled train movements?`)) {
+                      await clearAllTrains();
+                      onIngestSuccess();
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 flex items-center gap-1 transition-all"
+                  title="Clear all train movements"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Clear Trains</span>
+                </button>
+              )}
+            </div>
           </div>
 
           {trains.length === 0 ? (

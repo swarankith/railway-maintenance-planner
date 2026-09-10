@@ -58,6 +58,15 @@ export async function fetchTrains(corridor?: string): Promise<TrainMovement[]> {
   return res.json();
 }
 
+export async function clearAllTrains(): Promise<{ message: string }> {
+  const res = await fetch(`${API_BASE}/trains`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to clear trains');
+  return res.json();
+}
+
+
 // Requests CRUD
 export async function fetchRequests(filters?: {
   corridor?: string;

@@ -39,3 +39,24 @@ def list_train_movements(
         )
         for t in records
     ]
+
+
+@router.delete("/{train_id}")
+def delete_train(train_id: str, db: Session = Depends(get_db)):
+    """Delete a single train movement."""
+    record = db.query(DBTrainMovement).filter(DBTrainMovement.train_id == train_id).first()
+    if not record:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Train '{train_id}' not found.")
+    db.delete(record)
+    db.commit()
+    return {"message": f"Train {train_id} deleted successfully."}
+
+
+@router.delete("")
+def clear_all_trains(db: Session = Depends(get_db)):
+    """Delete all train movements."""
+    count = db.query(DBTrainMovement).delete()
+    db.commit()
+    return {"message": f"All {count} train movements cleared successfully."}
+

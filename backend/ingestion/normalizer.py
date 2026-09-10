@@ -233,6 +233,8 @@ def normalize_train_table(
     - km_start|km_from
     - km_end|km_to
     - train_type|type
+    - train_name|name
+    - speed|speed_kmh
     """
     if len(table) < 2:
         return []
@@ -241,28 +243,35 @@ def normalize_train_table(
     col_map = {}
     for idx, col in enumerate(header):
         c = col.strip().lower()
-        if any(k == c or k in c for k in ["train_id", "train no", "train_no", "train number", "id"]):
-            col_map["train_id"] = idx
-        elif any(k == c or k in c for k in ["corridor", "section", "route", "line"]):
+        if any(k in c for k in ["train_number", "train_no", "train no", "train number", "train #", "train_id", "train id", "service no", "train", "id"]):
+            if "train_id" not in col_map:
+                col_map["train_id"] = idx
+        elif any(k in c for k in ["corridor", "section", "route", "line", "block_section", "block section", "sector"]):
             col_map["corridor"] = idx
-        elif any(k == c or k in c for k in ["departure_time", "dep", "departure", "from_time", "start_time"]):
+        elif any(k in c for k in ["departure_time", "dep_time", "departure", "dep", "start_time", "from_time", "origin time"]):
             col_map["dep"] = idx
-        elif any(k == c or k in c for k in ["arrival_time", "arr", "arrival", "to_time", "end_time"]):
+        elif any(k in c for k in ["arrival_time", "arr_time", "arrival", "arr", "end_time", "to_time", "dest time"]):
             col_map["arr"] = idx
-        elif any(k == c or k in c for k in ["km_start", "km_from", "from_km", "start_km"]):
+        elif any(k in c for k in ["window", "time_window", "time window", "timings", "timing", "slot", "schedule"]):
+            col_map["time_window"] = idx
+        elif any(k in c for k in ["km_start", "km_from", "from_km", "start_km", "from km", "start km"]):
             col_map["km_start"] = idx
-        elif any(k == c or k in c for k in ["km_end", "km_to", "to_km", "end_km"]):
+        elif any(k in c for k in ["km_end", "km_to", "to_km", "end_km", "to km", "end km"]):
             col_map["km_end"] = idx
-        elif any(k == c or k in c for k in ["km", "chainage"]):
+        elif any(k in c for k in ["km", "chainage", "km_range", "km range", "span", "km span", "distance"]):
             col_map["km_range"] = idx
-        elif any(k == c or k in c for k in ["train_type", "type", "category"]):
+        elif any(k in c for k in ["train_name", "train name", "name", "service name", "title", "description"]):
+            col_map["train_name"] = idx
+        elif any(k in c for k in ["speed", "speed_kmh", "speed kmh", "mps", "max speed", "kmph"]):
+            col_map["speed"] = idx
+        elif any(k in c for k in ["train_type", "type", "category", "class"]):
             col_map["type"] = idx
 
     trains = []
     base_date = date.today() + timedelta(days=1)
 
     for row in table[1:]:
-        if not any(c.strip() for c in row):
+        if not any(str(c).strip() for c in row):
             continue
 
         def get_val(key: str) -> str:
@@ -270,11 +279,42 @@ def normalize_train_table(
                 return str(row[col_map[key]]).strip()
             return ""
 
-        tid = get_val("train_id") or f"T-{uuid.uuid4().hex[:4].upper()}"
-        corridor = get_val("corridor") or "NDLS-GZB"
+        raw_tid = get_val("train_id")
+        corridor = get_val("corridor")
+        t_name = get_val("train_name")
         t_type = get_val("type") or "Express"
+        raw_speed = get_val("speed")
 
-        k_s, k_e = 0.0, 500.0
+        # If corridor not found from mapped column, scan cells
+        if not corridor:
+            for cell in row:
+                cm = re.search(r"\b([A-Z]{2,5}\s*[-–\/]\s*[A-Z]{2,5})\b", str(cell).upper())
+                if cm:
+                    corridor = re.sub(r"\s+", "", cm.group(1)).replace("–", "-")
+                    break
+        if not corridor:
+            corridor = "NDLS-GZB"
+
+        # Clean train id and number
+        t_num = None
+        if raw_tid:
+            num_m = re.search(r"\b(\d{4,5})\b", raw_tid)
+            if num_m:
+                t_num = num_m.group(1)
+        if not t_num and t_name:
+            num_m = re.search(r"\b(\d{4,5})\b", t_name)
+            if num_m:
+                t_num = num_m.group(1)
+        if not t_num:
+            for cell in row:
+                num_m = re.search(r"\b(\d{4,5})\b", str(cell))
+                if num_m:
+                    t_num = num_m.group(1)
+                    break
+
+        tid = raw_tid or (f"Train {t_num}" if t_num else f"T-{uuid.uuid4().hex[:4].upper()}")
+
+        k_s, k_e = 0.0, 250.0
         if "km_start" in col_map and "km_end" in col_map:
             try:
                 k_s = float(re.sub(r"[^\d.]", "", get_val("km_start")))
@@ -285,9 +325,41 @@ def normalize_train_table(
             k1, k2 = parse_km_range_robust(get_val("km_range"))
             if k1 is not None and k2 is not None:
                 k_s, k_e = k1, k2
+        else:
+            for cell in row:
+                k1, k2 = parse_km_range_robust(str(cell))
+                if k1 is not None and k2 is not None:
+                    k_s, k_e = k1, k2
+                    break
 
         dep = parse_datetime_flexible(get_val("dep"), base_date)
         arr = parse_datetime_flexible(get_val("arr"), base_date)
+
+        if (not dep or not arr) and "time_window" in col_map:
+            w_s, w_e = parse_time_window(get_val("time_window"), base_date)
+            if not dep:
+                dep = w_s
+            if not arr:
+                arr = w_e
+
+        if not dep or not arr:
+            for cell in row:
+                w_s, w_e = parse_time_window(str(cell), base_date)
+                if w_s and w_e:
+                    if not dep:
+                        dep = w_s
+                    if not arr:
+                        arr = w_e
+                    break
+
+        if not dep:
+            all_times = []
+            for cell in row:
+                tm = re.findall(r"\b(\d{1,2}:\d{2})\b", str(cell))
+                all_times.extend(tm)
+            if len(all_times) >= 2:
+                dep = parse_datetime_flexible(all_times[0], base_date)
+                arr = parse_datetime_flexible(all_times[1], base_date)
 
         if not dep:
             dep = datetime.combine(base_date, datetime.min.time(), tzinfo=APP_TIMEZONE) + timedelta(hours=6)
@@ -296,8 +368,18 @@ def normalize_train_table(
         elif arr < dep:
             arr = arr + timedelta(days=1)
 
+        speed_val = 100.0
+        if raw_speed:
+            try:
+                speed_val = float(re.sub(r"[^\d.]", "", raw_speed))
+            except Exception:
+                pass
+
         trains.append(TrainMovement(
             train_id=tid,
+            train_number=t_num or tid,
+            train_name=t_name or f"Scheduled Train {t_num or tid}",
+            speed_kmh=speed_val,
             corridor=corridor,
             departure_time=dep,
             arrival_time=arr,
@@ -306,6 +388,92 @@ def normalize_train_table(
             train_type=t_type,
             source_document=source_filename
         ))
+
+    return trains
+
+
+def extract_trains_from_text(raw_text: str, source_filename: str) -> List[TrainMovement]:
+    """
+    Robust fallback to extract Train Movements line-by-line from unstructured text,
+    PDF text streams, circulars, or CSV logs.
+    """
+    trains: List[TrainMovement] = []
+    base_date = date.today() + timedelta(days=1)
+    seen = set()
+
+    # Pattern 1: Narrative / Circular format (e.g., Note 45, Section 2, or Memo)
+    p1 = r"(?:train|express|freight|mail|passenger)\s*(?:no\.?|#)?\s*([A-Za-z0-9\s\-]+?)\s*(?:on\s*(?:corridor\s*)?([A-Za-z0-9\-]+))?\s*(?:from|dep|departing)?\s*(\d{1,2}:\d{2})\s*(?:to|arr|arriving|-)\s*(\d{1,2}:\d{2})\s*(?:\(?km\s*(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\)?)?"
+    for m in re.finditer(p1, raw_text, re.IGNORECASE):
+        tid = m.group(1).strip()
+        corr = m.group(2).strip() if m.group(2) else "NDLS-GZB"
+        dep = parse_datetime_flexible(m.group(3), base_date)
+        arr = parse_datetime_flexible(m.group(4), base_date)
+        k1 = float(m.group(5)) if m.group(5) else 0.0
+        k2 = float(m.group(6)) if m.group(6) else 250.0
+        if dep and arr:
+            if arr < dep:
+                arr = arr + timedelta(days=1)
+            num_m = re.search(r"\b(\d{4,5})\b", tid)
+            t_num = num_m.group(1) if num_m else tid
+            key = (t_num, corr, dep.isoformat())
+            if key not in seen:
+                seen.add(key)
+                trains.append(TrainMovement(
+                    train_id=tid if "train" in tid.lower() else f"Train {tid}",
+                    train_number=t_num,
+                    train_name=tid,
+                    speed_kmh=110.0,
+                    corridor=corr,
+                    departure_time=dep,
+                    arrival_time=arr,
+                    km_start=min(k1, k2),
+                    km_end=max(k1, k2),
+                    train_type="Scheduled Passenger",
+                    source_document=source_filename
+                ))
+
+    # Pattern 2: Line-based tabular parsing
+    lines = raw_text.splitlines()
+    for line in lines:
+        line_clean = line.strip()
+        if len(line_clean) < 12:
+            continue
+
+        if re.search(r"^(?:train\s*no|corridor|section|sl\s*no|date|window)\b", line_clean, re.IGNORECASE):
+            continue
+
+        num_m = re.search(r"\b(\d{4,5})\b", line_clean)
+        corr_m = re.search(r"\b([A-Z]{2,5}\s*[-–\/]\s*[A-Z]{2,5})\b", line_clean.upper())
+        times = re.findall(r"\b(\d{1,2}:\d{2})\b", line_clean)
+
+        if (num_m or corr_m) and len(times) >= 2:
+            t_num = num_m.group(1) if num_m else f"T-{len(trains)+1}"
+            corr = re.sub(r"\s+", "", corr_m.group(1)).replace("–", "-") if corr_m else "NDLS-GZB"
+            dep = parse_datetime_flexible(times[0], base_date)
+            arr = parse_datetime_flexible(times[1], base_date)
+            k1, k2 = parse_km_range_robust(line_clean)
+            if k1 is None or k2 is None:
+                k1, k2 = 0.0, 250.0
+
+            if dep and arr:
+                if arr < dep:
+                    arr = arr + timedelta(days=1)
+                key = (t_num, corr, dep.isoformat())
+                if key not in seen:
+                    seen.add(key)
+                    trains.append(TrainMovement(
+                        train_id=f"Train {t_num}",
+                        train_number=t_num,
+                        train_name=f"Express {t_num}",
+                        speed_kmh=100.0,
+                        corridor=corr,
+                        departure_time=dep,
+                        arrival_time=arr,
+                        km_start=min(k1, k2),
+                        km_end=max(k1, k2),
+                        train_type="Scheduled Passenger",
+                        source_document=source_filename
+                    ))
 
     return trains
 
@@ -673,12 +841,20 @@ def process_document_content(doc: DocumentContent, doc_type: str = "request") ->
             table_trains = normalize_train_table(table, doc.filename)
             all_trains.extend(table_trains)
 
-        if not all_trains and len(doc.raw_text.strip()) > 20:
-            _, prose_trains = normalize_prose_text(doc.raw_text, doc.filename, application_id)
-            all_trains.extend(prose_trains)
+        # Robust extraction from raw text/prose lines
+        text_trains = extract_trains_from_text(doc.raw_text, doc.filename)
+        for tt in text_trains:
+            if not any(
+                t.train_id == tt.train_id or (
+                    t.corridor == tt.corridor and
+                    abs((t.departure_time - tt.departure_time).total_seconds()) < 600
+                )
+                for t in all_trains
+            ):
+                all_trains.append(tt)
 
         if not all_trains:
-            warnings.append(f"No train movements could be extracted from {doc.filename}. Check column headers.")
+            warnings.append(f"No train movements could be extracted from {doc.filename}. Check column headers or text format.")
 
         return IngestResponse(
             application_id=application_id,
@@ -699,6 +875,11 @@ def process_document_content(doc: DocumentContent, doc_type: str = "request") ->
     if not all_requests or len(doc.raw_text.strip()) > 50:
         prose_reqs, prose_trains = normalize_prose_text(doc.raw_text, doc.filename, application_id)
         all_trains.extend(prose_trains)
+        # Also check extract_trains_from_text
+        text_trains = extract_trains_from_text(doc.raw_text, doc.filename)
+        for tt in text_trains:
+            if not any(t.train_id == tt.train_id for t in all_trains):
+                all_trains.append(tt)
         if not all_requests:
             all_requests.extend(prose_reqs)
         else:

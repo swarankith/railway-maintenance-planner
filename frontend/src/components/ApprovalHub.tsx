@@ -9,7 +9,6 @@ import {
   FileCheck,
   AlertTriangle,
   Send,
-  Sparkles,
   Download,
   FileText,
 } from 'lucide-react';

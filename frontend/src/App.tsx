@@ -21,11 +21,9 @@ import {
   fetchTrains,
   checkConflicts,
   optimizeSchedule,
-  runDemoSchedule,
   createRequest,
   updateRequest,
 } from './services/api';
-import { Sparkles } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('ingest');
@@ -33,7 +31,6 @@ export const App: React.FC = () => {
   const [trains, setTrains] = useState<TrainMovement[]>([]);
   const [conflicts, setConflicts] = useState<ConflictDetail[]>([]);
   const [schedulePlan, setSchedulePlan] = useState<SchedulePlan | null>(null);
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
 
   const [selectedBlock, setSelectedBlock] = useState<MaintenanceBlock | null>(null);
   const [isBlockModalOpen, setIsBlockModalOpen] = useState(false);
@@ -44,7 +41,6 @@ export const App: React.FC = () => {
 
   const [loading, setLoading] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
-  const [isDemoLoading, setIsDemoLoading] = useState(false);
   const [isCheckingConflicts, setIsCheckingConflicts] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
@@ -92,7 +88,6 @@ export const App: React.FC = () => {
     try {
       const plan = await optimizeSchedule();
       setSchedulePlan(plan);
-      setIsDemoMode(false);
       await loadAllData();
       setActiveTab('gantt');
       showToast('Optimization complete! Bundled blocks generated with Deterministic Engine.', 'success');
@@ -100,41 +95,6 @@ export const App: React.FC = () => {
       showToast(err.message || 'Optimization failed', 'error');
     } finally {
       setIsOptimizing(false);
-    }
-  };
-
-  const handleLoadDemo = async () => {
-    setIsDemoLoading(true);
-    try {
-      const demoPlan = await runDemoSchedule();
-      setSchedulePlan(demoPlan);
-      setIsDemoMode(true);
-
-      // Extract requests from demo plan for UI display if needed
-      const demoRequests: MaintenanceRequest[] = [];
-      demoPlan.blocks.forEach((b) => {
-        b.requests.forEach((r) => {
-          if (!demoRequests.some((dr) => dr.request_id === r.request_id)) {
-            demoRequests.push(r);
-          }
-        });
-      });
-      if (demoPlan.deferred_requests) {
-        demoRequests.push(...demoPlan.deferred_requests);
-      }
-      if (demoPlan.manual_review_requests) {
-        demoRequests.push(...demoPlan.manual_review_requests);
-      }
-      if (demoRequests.length > 0) {
-        setRequests(demoRequests);
-      }
-
-      setActiveTab('gantt');
-      showToast('Demo mode active! Standard fixtures loaded in-memory (bypassed database).', 'info');
-    } catch (err: any) {
-      showToast(err.message || 'Failed to run demo simulation', 'error');
-    } finally {
-      setIsDemoLoading(false);
     }
   };
 
@@ -180,14 +140,6 @@ export const App: React.FC = () => {
         hasSchedule={schedulePlan !== null}
       />
 
-      {/* Demo Mode Banner */}
-      {isDemoMode && (
-        <div className="bg-purple-900 text-white px-4 py-2 text-xs font-bold text-center flex items-center justify-center gap-2 border-b border-purple-700 shadow-inner">
-          <Sparkles className="w-4 h-4 text-purple-300" />
-          <span>Demo Mode Active — Data in-memory only, will not be saved to database.</span>
-        </div>
-      )}
-
       {/* Toast Notification */}
       {toast && (
         <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-5 duration-200">
@@ -216,8 +168,6 @@ export const App: React.FC = () => {
             trains={trains}
             onTriggerOptimization={handleTriggerOptimization}
             isOptimizing={isOptimizing}
-            onLoadDemo={handleLoadDemo}
-            isDemoLoading={isDemoLoading}
           />
         )}
 

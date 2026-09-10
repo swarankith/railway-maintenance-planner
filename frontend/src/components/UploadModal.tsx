@@ -7,7 +7,6 @@ import {
   Edit3,
   Check,
   Trash2,
-  Sparkles,
   ArrowRight,
   Train,
   Clock,
@@ -29,8 +28,6 @@ interface UploadModalProps {
   trains: TrainMovement[];
   onTriggerOptimization: () => void;
   isOptimizing: boolean;
-  onLoadDemo: () => Promise<void>;
-  isDemoLoading: boolean;
 }
 
 type UploadType = 'request' | 'train_movement';
@@ -43,8 +40,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   trains,
   onTriggerOptimization,
   isOptimizing,
-  onLoadDemo,
-  isDemoLoading,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -139,22 +134,11 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Demo Button */}
-          <button
-            onClick={onLoadDemo}
-            disabled={isDemoLoading}
-            className="px-4 py-2.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-xs font-bold shadow-sm flex items-center gap-2 transition disabled:opacity-50"
-            title="Run instant in-memory simulation with standard test fixtures"
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>{isDemoLoading ? 'Loading Demo...' : 'Load Demo (in-memory, not saved)'}</span>
-          </button>
-
           {/* Optimize Button with Gating */}
           <button
             onClick={onTriggerOptimization}
             disabled={isOptimizing || !hasRequests || !hasTrains}
-            className="px-4 py-2.5 rounded-xl bg-saffron-500 hover:bg-saffron-600 text-navy-950 text-xs font-black shadow-md flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            className="px-5 py-2.5 rounded-xl bg-saffron-500 hover:bg-saffron-600 text-navy-950 text-xs font-black shadow-md flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Play className="w-4 h-4 fill-navy-950" />
             <span>{isOptimizing ? 'Optimizing...' : 'Run Deterministic Engine'}</span>
@@ -284,8 +268,8 @@ export const UploadModal: React.FC<UploadModalProps> = ({
       {ingestResult && (
         <div className="p-5 bg-white border border-saffron-300 rounded-2xl shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-saffron-100 text-saffron-700 flex items-center justify-center border border-saffron-300">
-              <Sparkles className="w-5 h-5" />
+            <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center border border-emerald-300">
+              <CheckCircle2 className="w-5 h-5 text-emerald-700" />
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -297,11 +281,19 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                Found {ingestResult.total_extracted} total candidate records (
-                <span className="text-emerald-700 font-bold">{ingestResult.confirmed_count} ready</span>,{' '}
-                <span className="text-amber-700 font-bold">{ingestResult.needs_review_count} needs review</span>
-                {ingestResult.detected_trains.length > 0 && `, ${ingestResult.detected_trains.length} train movements`}
-                )
+                {uploadType === 'train_movement' ? (
+                  <span className="text-emerald-700 font-bold">
+                    Successfully extracted and registered {ingestResult.detected_trains.length} scheduled train movement(s) into corridor constraints!
+                  </span>
+                ) : (
+                  <>
+                    Found {ingestResult.total_extracted} total candidate records (
+                    <span className="text-emerald-700 font-bold">{ingestResult.confirmed_count} ready</span>,{' '}
+                    <span className="text-amber-700 font-bold">{ingestResult.needs_review_count} needs review</span>
+                    {ingestResult.detected_trains.length > 0 && `, ${ingestResult.detected_trains.length} train movements`}
+                    )
+                  </>
+                )}
               </p>
             </div>
           </div>
@@ -315,6 +307,99 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Train Movements Table (when Train Movements tab is active) */}
+      {uploadType === 'train_movement' && (
+        <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+          <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-lg bg-blue-100 text-blue-800 flex items-center justify-center border border-blue-300">
+                <Train className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-navy-950">
+                  Scheduled Train Movements Pool ({eligibleTrains.length} Active / {trains.length} Total)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  These scheduled train services form hard safety constraints for corridor possession windows.
+                </p>
+              </div>
+            </div>
+            {eligibleTrains.length > 0 && (
+              <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                ✓ Ready for Engine Optimization
+              </span>
+            )}
+          </div>
+
+          {trains.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 text-xs">
+              No train movements loaded yet. Upload a Train Schedule PDF/CSV using the upload zone above.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs text-slate-800">
+                <thead className="bg-navy-800 uppercase text-[10px] text-white font-bold border-b border-slate-200">
+                  <tr>
+                    <th className="px-4 py-3">Train Number / ID</th>
+                    <th className="px-4 py-3">Train Name</th>
+                    <th className="px-4 py-3">Corridor</th>
+                    <th className="px-4 py-3">Departure (IST)</th>
+                    <th className="px-4 py-3">Arrival (IST)</th>
+                    <th className="px-4 py-3">KM Span</th>
+                    <th className="px-4 py-3">Speed (km/h)</th>
+                    <th className="px-4 py-3">Type</th>
+                    <th className="px-4 py-3">Eligibility</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {trains.map((t, idx) => (
+                    <tr key={t.train_id || idx} className="hover:bg-slate-50">
+                      <td className="px-4 py-3 font-mono font-bold text-navy-950">
+                        {t.train_number || t.train_id}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-slate-800">
+                        {t.train_name || 'Express Service'}
+                      </td>
+                      <td className="px-4 py-3 font-bold text-saffron-700">
+                        {t.corridor}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-slate-700">
+                        {new Date(t.departure_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-slate-700">
+                        {new Date(t.arrival_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        KM {t.km_start.toFixed(1)} – {t.km_end.toFixed(1)}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {t.speed_kmh ? `${t.speed_kmh} km/h` : '100 km/h'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                          {t.train_type || 'Passenger'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        {!t.cycle_id ? (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                            Active Eligible
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                            Assigned ({t.cycle_id})
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -462,7 +547,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
           <FileText className="w-12 h-12 text-slate-400 mx-auto mb-3" />
           <h4 className="text-sm font-bold text-slate-800">No records in database</h4>
           <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-            Starts with an empty database. Upload documents above or click &quot;Load Demo&quot; to test the deterministic engine.
+            Starts with an empty database. Upload documents above or add requests manually to run the deterministic engine.
           </p>
         </div>
       )}

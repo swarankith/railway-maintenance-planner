@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Save, AlertCircle, Sparkles, Wrench, Clock, MapPin, Zap } from 'lucide-react';
+import { X, Save, AlertCircle, Wrench, Clock, MapPin, Zap } from 'lucide-react';
 import { MaintenanceRequest, Department, BlockType, PriorityLevel } from '../types';
 
 interface EditRequestModalProps {

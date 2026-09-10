@@ -28,8 +28,19 @@ def extract_from_pdf(file_bytes: bytes, filename: str) -> DocumentContent:
                 page_text = page.extract_text() or ""
                 all_text_chunks.append(page_text)
                 
-                # Extract tables
+                # Extract tables (bordered first, fallback to text/stream layout)
                 page_tables = page.extract_tables()
+                if not page_tables:
+                    try:
+                        page_tables = page.extract_tables({
+                            "vertical_strategy": "text",
+                            "horizontal_strategy": "text",
+                            "snap_tolerance": 4,
+                            "join_tolerance": 3,
+                        })
+                    except Exception:
+                        pass
+
                 if page_tables:
                     for table in page_tables:
                         cleaned_table = []
@@ -89,9 +100,19 @@ def extract_document(file_bytes: bytes, filename: str) -> DocumentContent:
     elif ext in [".docx", ".doc"]:
         return extract_from_docx(file_bytes, filename)
     elif ext in [".txt", ".csv"]:
+        import csv
         content = file_bytes.decode("utf-8", errors="replace")
         doc = DocumentContent(filename=filename)
         doc.raw_text = content
+        if ext == ".csv" or "," in content or "\t" in content:
+            try:
+                delimiter = "\t" if "\t" in content and "," not in content else ","
+                reader = csv.reader(io.StringIO(content), delimiter=delimiter)
+                rows = [row for row in reader if any(cell.strip() for cell in row)]
+                if rows:
+                    doc.tables.append(rows)
+            except Exception:
+                pass
         return doc
     else:
         # Generic attempt

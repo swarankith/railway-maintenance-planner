@@ -25,6 +25,9 @@ def list_train_movements(
     return [
         TrainMovement(
             train_id=t.train_id,
+            train_number=t.train_number or t.train_id,
+            train_name=t.train_name,
+            speed_kmh=t.speed_kmh,
             corridor=t.corridor,
             departure_time=t.departure_time,
             arrival_time=t.arrival_time,

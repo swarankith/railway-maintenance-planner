@@ -123,8 +123,16 @@ async def ingest_document(
                 DBTrainMovement.departure_time == train.departure_time
             ).first()
             if not existing_train:
+                t_num = train.train_number
+                if not t_num:
+                    num_m = re.search(r"\b(\d{4,5})\b", train.train_id)
+                    t_num = num_m.group(1) if num_m else train.train_id
+
                 db_train = DBTrainMovement(
                     train_id=train.train_id,
+                    train_number=t_num,
+                    train_name=train.train_name or f"Scheduled Train {t_num}",
+                    speed_kmh=train.speed_kmh or 100.0,
                     corridor=train.corridor,
                     departure_time=train.departure_time,
                     arrival_time=train.arrival_time,

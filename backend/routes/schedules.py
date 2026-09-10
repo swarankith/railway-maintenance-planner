@@ -64,9 +64,16 @@ def get_eligible_requests(db: Session, request_ids: Optional[List[str]] = None) 
         if r.status in [RequestStatusEnum.REJECTED.value, RequestStatusEnum.APPROVED.value]:
             continue
 
-        if r.cycle_id is None:
+        if not r.cycle_id:
             # Brand new
-            if r.status in [RequestStatusEnum.CONFIRMED.value, RequestStatusEnum.INGESTED.value]:
+            if r.status in [
+                RequestStatusEnum.CONFIRMED.value,
+                RequestStatusEnum.INGESTED.value,
+                RequestStatusEnum.NEEDS_REVIEW.value,
+                RequestStatusEnum.DEFERRED.value,
+                RequestStatusEnum.MANUAL_REVIEW.value,
+                RequestStatusEnum.OPTIMIZED.value
+            ]:
                 eligible.append(r)
         elif r.cycle_id in completed_cycle_ids:
             # From a closed cycle
@@ -78,10 +85,12 @@ def get_eligible_requests(db: Session, request_ids: Optional[List[str]] = None) 
 
 def get_eligible_trains(db: Session) -> List[DBTrainMovement]:
     """
-    Part E: Trains are eligible if cycle_id is NULL.
+    Part E: Trains are eligible if cycle_id is NULL or empty string.
     Once a cycle finishes, trains in that cycle become ineligible for future cycles.
     """
-    return db.query(DBTrainMovement).filter(DBTrainMovement.cycle_id == None).all()
+    return db.query(DBTrainMovement).filter(
+        (DBTrainMovement.cycle_id == None) | (DBTrainMovement.cycle_id == "")
+    ).all()
 
 
 @router.post("/optimize", response_model=OptimizationResult)

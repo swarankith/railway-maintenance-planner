@@ -3,7 +3,6 @@ import {
   X,
   Clock,
   MapPin,
-  Sparkles,
   Wrench,
   Zap,
   CheckCircle2,
@@ -107,7 +106,7 @@ export const BlockDetailModal: React.FC<BlockDetailModalProps> = ({
           {/* Explainability Callout */}
           <div className="p-4 bg-saffron-50 border border-saffron-200 rounded-2xl shadow-sm">
             <div className="flex items-center gap-2 mb-2 text-saffron-800 font-bold text-xs">
-              <Sparkles className="w-4 h-4 text-saffron-600" />
+              <Layers className="w-4 h-4 text-saffron-600" />
               <span>AI Bundling & Safety Rationale (Explainable Output)</span>
             </div>
             <p className="text-slate-800 leading-relaxed text-xs">

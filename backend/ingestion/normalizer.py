@@ -1,13 +1,15 @@
 """
 Robust Normalization Layer for Railway Maintenance Requests and Train Movements.
-Converts arbitrary tables, key-value blocks, and prose into canonical MaintenanceRequest objects.
-Flags incomplete or ambiguous records as Needs-Review.
+Converts arbitrary tables, key-value blocks, and prose into canonical objects.
 
-Phase 2 Updates:
-- Priority Convention: 1=Emergency, 2=High Urgent, 3=Normal
-- Application ID assignment: APP-YYYYMMDD-XXXXXX per document
-- Robust KM parsing and resource normalization
-- Train movement extraction from tables and prose
+Phase 2 Final (v8):
+- Priority parsing: correctly handles "P1", "P2", "P3" tokens and orders keywords
+  so "urgent" alone maps to P2, not P1.
+- Train header aliases accept both underscore and space variants
+  (e.g. "KM Start" and "km_start").
+- Header-row detection: repeated PDF header rows emitted on page breaks are skipped
+  so they don't get mis-parsed as garbage data records.
+- Corridor availability is intentionally out of scope.
 """
 import re
 import uuid
@@ -30,6 +32,29 @@ from backend.engine.conflicts import parse_km_range_robust, normalize_resource_n
 
 # Alias for backwards compatibility
 parse_km_range = parse_km_range_robust
+
+
+# ---------------------------------------------------------------------------
+# Header-row detection
+# ---------------------------------------------------------------------------
+HEADER_WORDS = {
+    "job id", "request id", "department", "corridor", "km range",
+    "asset", "work type", "priority", "duration", "time window",
+    "date", "resources", "isolation", "block type",
+    "start time", "end time", "train id", "train number",
+    "train name", "departure", "arrival", "speed",
+}
+
+
+def _looks_like_header_row(cells: List[str]) -> bool:
+    """
+    Detect a row that is actually a repeated PDF header (emitted on page breaks
+    by some extractors) rather than genuine data. If 3+ header keywords appear
+    in the joined cells, treat the row as a header and skip it.
+    """
+    joined = " ".join((c or "").lower() for c in cells)
+    hits = sum(1 for w in HEADER_WORDS if w in joined)
+    return hits >= 3
 
 
 DEPT_PATTERNS = {
@@ -179,8 +204,6 @@ def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
       1. Explicit "P1" / "P2" / "P3" token in the string
       2. Bare digit "1", "2", or "3" alone
       3. Keyword fallback (specific phrases before generic ones)
-
-    Returns (priority, reason, is_flagged_for_review).
     """
     text = (text or "").strip()
     t_lower = text.lower()
@@ -188,7 +211,6 @@ def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
     labels = {1: "P1 - Emergency", 2: "P2 - High Urgent", 3: "P3 - Normal"}
 
     # -------- 1. Explicit P1 / P2 / P3 token --------
-    # \b before "P" correctly matches "P2" at a word boundary.
     m_p = re.search(r"\b[pP]\s*([1-9])\b", text)
     if m_p:
         p = int(m_p.group(1))
@@ -240,6 +262,10 @@ def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
 
 
 def normalize_block_type(text: str) -> BlockTypeEnum:
+    """
+    Maps free text to BlockType. Only explicit emergency/breakdown indicators
+    set EMERGENCY; "urgent" alone does not.
+    """
     t_lower = text.lower()
     if "emergency" in t_lower or "breakdown" in t_lower:
         return BlockTypeEnum.EMERGENCY
@@ -256,6 +282,9 @@ def extract_resources(text: str) -> List[str]:
     return list(dict.fromkeys(found))
 
 
+# ---------------------------------------------------------------------------
+# Maintenance Request table parser
+# ---------------------------------------------------------------------------
 def normalize_table_data(
     table: List[List[str]],
     source_filename: str,
@@ -311,6 +340,9 @@ def normalize_table_data(
 
     for row_idx, row in enumerate(table[1:]):
         if not any(c.strip() for c in row):
+            continue
+        # Skip repeated header rows that some PDF extractors emit on page breaks
+        if _looks_like_header_row(row):
             continue
 
         def get_col(key: str) -> str:
@@ -432,6 +464,9 @@ def normalize_table_data(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Prose parser (fallback for non-table documents)
+# ---------------------------------------------------------------------------
 def normalize_prose_text(
     raw_text: str,
     source_filename: str,
@@ -586,38 +621,49 @@ def normalize_prose_text(
     return requests, trains
 
 
+# ---------------------------------------------------------------------------
+# Train Movement table parser — space-variant aware
+# ---------------------------------------------------------------------------
 def normalize_train_table(
     table: List[List[str]],
     source_filename: str,
     application_id: Optional[str] = None
 ) -> List[TrainMovement]:
-    """Extract train movements from a structured table."""
+    """
+    Extract train movements from a structured table.
+
+    Header matching collapses whitespace and underscores to a single space
+    before comparison, so both "KM Start" and "km_start" are recognized.
+    """
     if len(table) < 2:
         return []
 
     header_row = [c.lower().strip() for c in table[0]]
     col_map: Dict[str, int] = {}
+
     for idx, col in enumerate(header_row):
-        c = col.strip().lower()
-        if c in ["train_id", "train id", "train no", "train number", "id"]:
+        # Normalize: lowercase, collapse runs of spaces/underscores into one space
+        c_norm = re.sub(r"[\s_]+", " ", col.strip().lower())
+
+        if c_norm in ["train id", "train no", "train number", "id"]:
             col_map["train_id"] = idx
-        elif c in ["train_number", "number"]:
+        elif c_norm in ["train number", "number"]:
             col_map["train_number"] = idx
-        elif c in ["train_name", "name"]:
+        elif c_norm in ["train name", "name"]:
             col_map["train_name"] = idx
-        elif c in ["corridor", "section", "route", "line"]:
+        elif c_norm in ["corridor", "section", "route", "line"]:
             col_map["corridor"] = idx
-        elif c in ["departure_time", "departure", "dep", "from", "start_time"]:
+        elif c_norm in ["departure time", "departure", "dep", "from", "start time", "start"]:
             col_map["departure_time"] = idx
-        elif c in ["arrival_time", "arrival", "arr", "to", "end_time"]:
+        elif c_norm in ["arrival time", "arrival", "arr", "to", "end time", "end"]:
             col_map["arrival_time"] = idx
-        elif c in ["km_start", "km_from", "from_km", "start_km"]:
+        elif c_norm in ["km start", "km from", "from km", "start km"]:
             col_map["km_start"] = idx
-        elif c in ["km_end", "km_to", "to_km", "end_km"]:
+        elif c_norm in ["km end", "km to", "to km", "end km"]:
             col_map["km_end"] = idx
-        elif c in ["train_type", "type"]:
+        elif c_norm in ["train type", "type"]:
             col_map["train_type"] = idx
-        elif c in ["speed_kmh", "speed", "speed (km/h)"]:
+        elif c_norm in ["speed kmh", "speed", "speed (km/h)", "speed km/h"]:
             col_map["speed_kmh"] = idx
 
     trains: List[TrainMovement] = []
@@ -625,6 +671,9 @@ def normalize_train_table(
 
     for row in table[1:]:
         if not any(cell.strip() for cell in row):
+            continue
+        # Skip repeated header rows (some PDF extractors emit these on page breaks)
+        if _looks_like_header_row(row):
             continue
 
         def get_col(key: str) -> str:
@@ -683,6 +732,9 @@ def normalize_train_table(
     return trains
 
 
+# ---------------------------------------------------------------------------
+# Top-level dispatcher
+# ---------------------------------------------------------------------------
 def process_document_content(doc: DocumentContent, doc_type: Optional[str] = None) -> IngestResponse:
     application_id = generate_application_id()
     all_requests: List[MaintenanceRequest] = []

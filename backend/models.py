@@ -1,15 +1,13 @@
 """
 Canonical Data Models, Pydantic Schemas, and SQLAlchemy Database Entities.
 All timestamps are timezone-aware (IST, Asia/Kolkata, UTC+5:30).
-Phase 2 Final (v7):
-- Authentication removed
-- Application ID (APP-YYYYMMDD-XXXXXX)
-- Priority Schema (1=Emergency, 2=High Urgent, 3=Normal)
-- document_type and confidence_score columns on DBMaintenanceRequest
-- cycle_id on DBMaintenanceRequest and DBTrainMovement
-- ProcessingCycle with status (Active | Approved | Rejected | Archived)
-- DBApprovalAudit with cycle_id and report_url
-- ConflictTypeEnum cleaned: duplicate RESOURCE_OVERLAP / TRAIN_MOVEMENT_CONFLICT removed
+
+Phase 2 Final (v9):
+- Column widths widened to prevent psycopg2 StringDataRightTruncation on Postgres.
+- Authentication removed.
+- cycle_id, document_type, confidence_score columns.
+- ProcessingCycle with status field.
+- DBApprovalAudit with cycle_id and report_url.
 """
 import uuid
 import json
@@ -344,25 +342,25 @@ class DBMaintenanceRequest(Base):
     __tablename__ = "maintenance_requests"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    request_id = Column(String(64), unique=True, index=True, nullable=False)
-    application_id = Column(String(64), index=True, nullable=True)
+    request_id = Column(String(128), unique=True, index=True, nullable=False)
+    application_id = Column(String(128), index=True, nullable=True)
     cycle_id = Column(String(64), index=True, nullable=True)
-    document_type = Column(String(32), nullable=False, default="maintenance")
-    department = Column(String(32), nullable=False)
-    corridor = Column(String(64), index=True, nullable=False)
+    document_type = Column(String(64), nullable=False, default="maintenance")
+    department = Column(String(64), nullable=False)
+    corridor = Column(String(255), index=True, nullable=False)
     km_start = Column(Float, nullable=False)
     km_end = Column(Float, nullable=False)
-    asset = Column(String(128), nullable=False)
-    work_type = Column(String(128), nullable=False)
+    asset = Column(String(255), nullable=False)
+    work_type = Column(String(255), nullable=False)
     priority = Column(Integer, nullable=False, default=3)
-    priority_reason = Column(Text, nullable=True)
+    priority_reason = Column(String(255), nullable=True)
     block_type = Column(String(32), nullable=False, default="Normal")
     duration_minutes = Column(Integer, nullable=False)
     earliest_start = Column(DateTime(timezone=True), nullable=False)
     latest_end = Column(DateTime(timezone=True), nullable=False)
     due_date = Column(Date, nullable=True)
     required_resources = Column(JSON, nullable=False, default=list)
-    isolation_requirement = Column(String(64), nullable=True, default="None")
+    isolation_requirement = Column(String(128), nullable=True, default="None")
     block_shared_allowed = Column(Boolean, nullable=False, default=True)
     dependencies = Column(JSON, nullable=False, default=list)
     status = Column(String(32), nullable=False, default="Ingested")
@@ -380,11 +378,11 @@ class DBTrainMovement(Base):
     __tablename__ = "train_movements"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    train_id = Column(String(64), index=True, nullable=False)
-    train_number = Column(String(32), nullable=True)
-    train_name = Column(String(128), nullable=True)
+    train_id = Column(String(128), index=True, nullable=False)
+    train_number = Column(String(64), nullable=True)
+    train_name = Column(String(255), nullable=True)
     speed_kmh = Column(Float, nullable=True)
-    corridor = Column(String(64), index=True, nullable=False)
+    corridor = Column(String(255), index=True, nullable=False)
     departure_time = Column(DateTime(timezone=True), nullable=False)
     arrival_time = Column(DateTime(timezone=True), nullable=False)
     km_start = Column(Float, nullable=False)
@@ -400,7 +398,7 @@ class DBSchedulePlan(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     schedule_id = Column(String(64), unique=True, index=True, nullable=False)
     cycle_id = Column(String(64), index=True, nullable=True)
-    plan_name = Column(String(128), nullable=False)
+    plan_name = Column(String(255), nullable=False)
     is_recommended = Column(Boolean, default=True)
     status = Column(String(32), default="Generated")
     plan_data = Column(JSON, nullable=False)
@@ -416,7 +414,7 @@ class DBApprovalAudit(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     schedule_id = Column(String(64), index=True, nullable=False)
-    application_id = Column(String(64), index=True, nullable=True)
+    application_id = Column(String(128), index=True, nullable=True)
     cycle_id = Column(String(64), index=True, nullable=True)
     action = Column(String(32), nullable=False)
     role = Column(String(128), nullable=False)
@@ -445,8 +443,8 @@ class DBEscalationEvent(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_id = Column(String(64), unique=True, index=True, nullable=False)
-    request_id = Column(String(64), index=True, nullable=False)
-    corridor = Column(String(64), nullable=False)
+    request_id = Column(String(128), index=True, nullable=False)
+    corridor = Column(String(255), nullable=False)
     reason = Column(Text, nullable=False)
     escalated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(APP_TIMEZONE))
     status = Column(String(32), default="Pending")

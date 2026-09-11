@@ -2,13 +2,11 @@
 Robust Normalization Layer for Railway Maintenance Requests and Train Movements.
 Converts arbitrary tables, key-value blocks, and prose into canonical objects.
 
-Phase 2 Final (v8):
-- Priority parsing: correctly handles "P1", "P2", "P3" tokens and orders keywords
-  so "urgent" alone maps to P2, not P1.
-- Train header aliases accept both underscore and space variants
-  (e.g. "KM Start" and "km_start").
-- Header-row detection: repeated PDF header rows emitted on page breaks are skipped
-  so they don't get mis-parsed as garbage data records.
+Phase 2 Final (v9):
+- Priority parsing correctly handles "P1", "P2", "P3" tokens.
+- Train header aliases accept both underscore and space variants.
+- Header-row detection: repeated PDF header rows (emitted on page breaks)
+  are skipped in BOTH table and prose parsers.
 - Corridor availability is intentionally out of scope.
 """
 import re
@@ -48,9 +46,9 @@ HEADER_WORDS = {
 
 def _looks_like_header_row(cells: List[str]) -> bool:
     """
-    Detect a row that is actually a repeated PDF header (emitted on page breaks
-    by some extractors) rather than genuine data. If 3+ header keywords appear
-    in the joined cells, treat the row as a header and skip it.
+    Detect a row that is actually a repeated PDF header (emitted on page breaks)
+    rather than genuine data. If 3+ header keywords appear in the joined cells,
+    treat the row as a header and skip it.
     """
     joined = " ".join((c or "").lower() for c in cells)
     hits = sum(1 for w in HEADER_WORDS if w in joined)
@@ -199,18 +197,12 @@ def parse_time_window(text: str, default_date: Optional[date] = None) -> Tuple[O
 def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
     """
     Normalizes priority to Phase 2 convention: 1=Emergency, 2=High Urgent, 3=Normal.
-
-    Order of resolution (most specific first):
-      1. Explicit "P1" / "P2" / "P3" token in the string
-      2. Bare digit "1", "2", or "3" alone
-      3. Keyword fallback (specific phrases before generic ones)
     """
     text = (text or "").strip()
     t_lower = text.lower()
 
     labels = {1: "P1 - Emergency", 2: "P2 - High Urgent", 3: "P3 - Normal"}
 
-    # -------- 1. Explicit P1 / P2 / P3 token --------
     m_p = re.search(r"\b[pP]\s*([1-9])\b", text)
     if m_p:
         p = int(m_p.group(1))
@@ -222,7 +214,6 @@ def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
             True,
         )
 
-    # -------- 2. Bare digit alone --------
     m_num = re.search(r"^\s*([1-9])\s*$", text)
     if m_num:
         p = int(m_num.group(1))
@@ -234,25 +225,20 @@ def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
             True,
         )
 
-    # -------- 3. Keyword fallback --------
-    # P1 keywords — true emergency indicators only. "urgent" is NOT included here.
     if any(w in t_lower for w in [
         "critical", "emergency", "safety defect", "derailment risk", "immediate",
     ]):
         return 1, "P1 - Emergency (Safety defect / derailment risk)", False
 
-    # P2 keywords — high urgency but not critical
     if any(w in t_lower for w in [
         "high urgent", "high-urgency", "high urgency",
         "speed restriction", "psr", "tsr removal",
     ]):
         return 2, "P2 - High Urgent (Speed restriction removal)", False
 
-    # Generic "urgent" without "high" → treat as P2, not P1
     if "urgent" in t_lower:
         return 2, "P2 - High Urgent", False
 
-    # P3 keywords
     if any(w in t_lower for w in [
         "planned", "standard", "scheduled", "periodic", "medium", "normal",
     ]):
@@ -262,10 +248,6 @@ def normalize_priority(text: str) -> Tuple[int, Optional[str], bool]:
 
 
 def normalize_block_type(text: str) -> BlockTypeEnum:
-    """
-    Maps free text to BlockType. Only explicit emergency/breakdown indicators
-    set EMERGENCY; "urgent" alone does not.
-    """
     t_lower = text.lower()
     if "emergency" in t_lower or "breakdown" in t_lower:
         return BlockTypeEnum.EMERGENCY
@@ -341,7 +323,6 @@ def normalize_table_data(
     for row_idx, row in enumerate(table[1:]):
         if not any(c.strip() for c in row):
             continue
-        # Skip repeated header rows that some PDF extractors emit on page breaks
         if _looks_like_header_row(row):
             continue
 
@@ -465,7 +446,7 @@ def normalize_table_data(
 
 
 # ---------------------------------------------------------------------------
-# Prose parser (fallback for non-table documents)
+# Prose parser (fallback)
 # ---------------------------------------------------------------------------
 def normalize_prose_text(
     raw_text: str,
@@ -515,6 +496,10 @@ def normalize_prose_text(
     for chunk in chunks:
         chunk_clean = chunk.strip()
         if len(chunk_clean) < 25:
+            continue
+
+        # Skip chunks that are actually a repeated PDF header row
+        if _looks_like_header_row(chunk_clean.split()):
             continue
 
         if re.search(r"^railway\s*maintenance\s*plan|^daily\s*block\s*summary", chunk_clean, re.IGNORECASE) and len(chunk_clean) < 100:
@@ -622,19 +607,13 @@ def normalize_prose_text(
 
 
 # ---------------------------------------------------------------------------
-# Train Movement table parser — space-variant aware
+# Train Movement table parser
 # ---------------------------------------------------------------------------
 def normalize_train_table(
     table: List[List[str]],
     source_filename: str,
     application_id: Optional[str] = None
 ) -> List[TrainMovement]:
-    """
-    Extract train movements from a structured table.
-
-    Header matching collapses whitespace and underscores to a single space
-    before comparison, so both "KM Start" and "km_start" are recognized.
-    """
     if len(table) < 2:
         return []
 
@@ -642,7 +621,6 @@ def normalize_train_table(
     col_map: Dict[str, int] = {}
 
     for idx, col in enumerate(header_row):
-        # Normalize: lowercase, collapse runs of spaces/underscores into one space
         c_norm = re.sub(r"[\s_]+", " ", col.strip().lower())
 
         if c_norm in ["train id", "train no", "train number", "id"]:
@@ -672,7 +650,6 @@ def normalize_train_table(
     for row in table[1:]:
         if not any(cell.strip() for cell in row):
             continue
-        # Skip repeated header rows (some PDF extractors emit these on page breaks)
         if _looks_like_header_row(row):
             continue
 

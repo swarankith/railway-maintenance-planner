@@ -1,8 +1,12 @@
 """
 Ingestion API Endpoint: POST /api/v1/ingest
-Accepts PDF/DOCX/TXT file uploads, extracts requests or train movements based on doc_type.
-Assigns unique Application ID (APP-YYYYMMDD-XXXXXX).
-No authentication (open API per Part C).
+Accepts PDF/DOCX/TXT file uploads, extracts requests, normalizes fields,
+assigns Application ID, and flags incomplete records.
+
+Supports document types: maintenance request, train movement.
+
+Postgres-safe: every string field is truncated to its column width before insert
+to prevent psycopg2 StringDataRightTruncation errors.
 """
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -24,16 +28,27 @@ from backend.ingestion.normalizer import process_document_content
 router = APIRouter(prefix="/api/v1", tags=["Ingestion"])
 
 
+def _safe(value, max_len: int, default: str = "") -> str:
+    """
+    Safely convert a value to a string and truncate it to fit the DB column
+    width. Prevents psycopg2.errors.StringDataRightTruncation on Postgres.
+    """
+    if value is None:
+        return default
+    s = str(value)
+    return s[:max_len] if len(s) > max_len else s
+
+
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest_document(
     file: UploadFile = File(...),
-    doc_type: str = Query("request", enum=["request", "train_movement"]),
+    doc_type: Optional[str] = Query(None, enum=["request", "train_movement"]),
     db: Session = Depends(get_db)
 ):
     """
-    Upload a maintenance work request or train movement document (PDF or DOCX).
-    Assigns unique Application ID (APP-YYYYMMDD-XXXXXX).
-    Extracts text/tables, normalizes fields, and enters records with cycle_id = null.
+    Upload a document (PDF or DOCX).
+    - doc_type == "request" (default): extract and store maintenance requests.
+    - doc_type == "train_movement": extract and store train movements.
     """
     try:
         content_bytes = await file.read()
@@ -43,106 +58,104 @@ async def ingest_document(
         doc_content = extract_document(content_bytes, file.filename)
         ingest_res = process_document_content(doc_content, doc_type=doc_type)
 
-        # Persist extracted requests if doc_type is request
-        seen_ids = set()
-        for req in ingest_res.candidate_requests:
-            clean_id = re.sub(r"\s+", "", str(req.request_id)).strip() if req.request_id else ""
-            if not clean_id:
-                clean_id = f"REQ-{uuid.uuid4().hex[:6].upper()}"
+        # ---------- 1. MAINTENANCE REQUESTS ----------
+        if doc_type is None or doc_type == "request":
+            seen_ids = set()
+            for req in ingest_res.candidate_requests:
+                clean_id = re.sub(r"\s+", "", str(req.request_id)).strip() if req.request_id else ""
+                if not clean_id:
+                    clean_id = f"REQ-{uuid.uuid4().hex[:6].upper()}"
 
-            orig_id = clean_id
-            counter = 1
-            while clean_id in seen_ids:
-                clean_id = f"{orig_id}_{counter}"
-                counter += 1
-            seen_ids.add(clean_id)
-            req.request_id = clean_id
+                orig_id = clean_id
+                counter = 1
+                while clean_id in seen_ids:
+                    clean_id = f"{orig_id}_{counter}"
+                    counter += 1
+                seen_ids.add(clean_id)
+                req.request_id = clean_id
 
-            existing = db.query(DBMaintenanceRequest).filter(DBMaintenanceRequest.request_id == req.request_id).first()
-            if existing:
-                existing.application_id = req.application_id or ingest_res.application_id
-                existing.document_type = "maintenance"
-                existing.department = str(req.department)
-                existing.corridor = req.corridor
-                existing.km_start = req.km_start
-                existing.km_end = req.km_end
-                existing.asset = req.asset
-                existing.work_type = req.work_type
-                existing.priority = req.priority
-                existing.priority_reason = req.priority_reason
-                existing.block_type = req.block_type.value
-                existing.duration_minutes = req.duration_minutes
-                existing.earliest_start = req.earliest_start
-                existing.latest_end = req.latest_end
-                existing.due_date = req.due_date
-                existing.required_resources = req.required_resources
-                existing.isolation_requirement = req.isolation_requirement
-                existing.block_shared_allowed = req.block_shared_allowed
-                existing.dependencies = req.dependencies
-                existing.status = req.status.value
-                existing.source_document = req.source_document
-                existing.missing_fields = req.missing_fields
-                existing.validation_notes = req.validation_notes
-                existing.confidence_score = req.confidence_score
-            else:
-                db_req = DBMaintenanceRequest(
-                    request_id=req.request_id,
-                    application_id=req.application_id or ingest_res.application_id,
-                    cycle_id=None,
-                    document_type="maintenance",
-                    department=str(req.department),
-                    corridor=req.corridor,
-                    km_start=req.km_start,
-                    km_end=req.km_end,
-                    asset=req.asset,
-                    work_type=req.work_type,
-                    priority=req.priority,
-                    priority_reason=req.priority_reason,
-                    block_type=req.block_type.value,
-                    duration_minutes=req.duration_minutes,
-                    earliest_start=req.earliest_start,
-                    latest_end=req.latest_end,
-                    due_date=req.due_date,
-                    required_resources=req.required_resources,
-                    isolation_requirement=req.isolation_requirement,
-                    block_shared_allowed=req.block_shared_allowed,
-                    dependencies=req.dependencies,
-                    status=req.status.value,
-                    source_document=req.source_document,
-                    missing_fields=req.missing_fields,
-                    confidence_score=req.confidence_score,
-                    validation_notes=req.validation_notes
-                )
-                db.add(db_req)
+                existing = db.query(DBMaintenanceRequest).filter(
+                    DBMaintenanceRequest.request_id == clean_id
+                ).first()
 
-        # Persist detected train movements
-        for train in ingest_res.detected_trains:
-            existing_train = db.query(DBTrainMovement).filter(
-                DBTrainMovement.train_id == train.train_id,
-                DBTrainMovement.corridor == train.corridor,
-                DBTrainMovement.departure_time == train.departure_time
-            ).first()
-            if not existing_train:
-                t_num = train.train_number
-                if not t_num:
-                    num_m = re.search(r"\b(\d{4,5})\b", train.train_id)
-                    t_num = num_m.group(1) if num_m else train.train_id
+                app_id = _safe(req.application_id or ingest_res.application_id, 128)
 
-                db_train = DBTrainMovement(
-                    train_id=train.train_id,
-                    train_number=t_num,
-                    train_name=train.train_name or f"Scheduled Train {t_num}",
-                    speed_kmh=train.speed_kmh or 100.0,
-                    corridor=train.corridor,
-                    departure_time=train.departure_time,
-                    arrival_time=train.arrival_time,
-                    km_start=train.km_start,
-                    km_end=train.km_end,
-                    train_type=train.train_type,
-                    source_document=train.source_document,
-                    cycle_id=None
-                )
-                db.add(db_train)
+                if existing:
+                    existing.application_id = app_id
+                    existing.department = _safe(str(req.department), 64)
+                    existing.corridor = _safe(req.corridor, 255)
+                    existing.km_start = req.km_start
+                    existing.km_end = req.km_end
+                    existing.asset = _safe(req.asset, 255)
+                    existing.work_type = _safe(req.work_type, 255)
+                    existing.priority = req.priority
+                    existing.priority_reason = _safe(req.priority_reason, 255)
+                    existing.block_type = _safe(req.block_type.value, 32)
+                    existing.duration_minutes = req.duration_minutes
+                    existing.earliest_start = req.earliest_start
+                    existing.latest_end = req.latest_end
+                    existing.due_date = req.due_date
+                    existing.required_resources = req.required_resources
+                    existing.isolation_requirement = _safe(req.isolation_requirement, 128)
+                    existing.block_shared_allowed = req.block_shared_allowed
+                    existing.dependencies = req.dependencies
+                    existing.status = _safe(req.status.value, 32)
+                    existing.source_document = _safe(req.source_document, 255)
+                    existing.missing_fields = req.missing_fields
+                    existing.validation_notes = _safe(req.validation_notes, 500, "")
+                    existing.document_type = "maintenance"
+                else:
+                    new_req = DBMaintenanceRequest(
+                        request_id=_safe(clean_id, 128),
+                        application_id=app_id,
+                        department=_safe(str(req.department), 64),
+                        corridor=_safe(req.corridor, 255),
+                        km_start=req.km_start,
+                        km_end=req.km_end,
+                        asset=_safe(req.asset, 255),
+                        work_type=_safe(req.work_type, 255),
+                        priority=req.priority,
+                        priority_reason=_safe(req.priority_reason, 255),
+                        block_type=_safe(req.block_type.value, 32),
+                        duration_minutes=req.duration_minutes,
+                        earliest_start=req.earliest_start,
+                        latest_end=req.latest_end,
+                        due_date=req.due_date,
+                        required_resources=req.required_resources,
+                        isolation_requirement=_safe(req.isolation_requirement, 128),
+                        block_shared_allowed=req.block_shared_allowed,
+                        dependencies=req.dependencies,
+                        status=_safe(req.status.value, 32),
+                        source_document=_safe(req.source_document, 255),
+                        missing_fields=req.missing_fields,
+                        validation_notes=_safe(req.validation_notes, 500, ""),
+                        document_type="maintenance",
+                    )
+                    db.add(new_req)
+
+        # ---------- 2. TRAIN MOVEMENTS ----------
+        if doc_type == "train_movement":
+            for train in ingest_res.detected_trains:
+                existing_train = db.query(DBTrainMovement).filter(
+                    DBTrainMovement.train_id == train.train_id,
+                    DBTrainMovement.corridor == train.corridor,
+                    DBTrainMovement.departure_time == train.departure_time,
+                ).first()
+                if not existing_train:
+                    db_train = DBTrainMovement(
+                        train_id=_safe(train.train_id, 128),
+                        train_number=_safe(getattr(train, "train_number", None), 64),
+                        train_name=_safe(getattr(train, "train_name", None), 255),
+                        speed_kmh=getattr(train, "speed_kmh", None),
+                        corridor=_safe(train.corridor, 255),
+                        departure_time=train.departure_time,
+                        arrival_time=train.arrival_time,
+                        km_start=train.km_start,
+                        km_end=train.km_end,
+                        train_type=_safe(train.train_type, 64),
+                        source_document=_safe(train.source_document, 255),
+                    )
+                    db.add(db_train)
 
         db.commit()
         return ingest_res

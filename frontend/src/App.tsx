@@ -130,7 +130,6 @@ export const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col selection:bg-saffron-500 selection:text-white">
-      {/* Header Navbar */}
       <Navbar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -140,7 +139,6 @@ export const App: React.FC = () => {
         hasSchedule={schedulePlan !== null}
       />
 
-      {/* Toast Notification */}
       {toast && (
         <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-5 duration-200">
           <div
@@ -157,7 +155,6 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {activeTab === 'ingest' && (
           <UploadModal
@@ -213,7 +210,6 @@ export const App: React.FC = () => {
         {activeTab === 'history' && <ApprovalHistoryPortal />}
       </main>
 
-      {/* Modals */}
       <EditRequestModal
         isOpen={isEditModalOpen}
         onClose={() => setIsEditModalOpen(false)}

@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   Search,
-  Filter,
   RefreshCw,
   Plus,
   Play,
@@ -10,16 +9,16 @@ import {
   Trash2,
   CheckCircle,
   FileSpreadsheet,
-  FileText,
-  Clock,
-  MapPin,
-  Building,
-  Layers,
-  Wrench,
   Download,
 } from 'lucide-react';
-import { MaintenanceRequest, Department, RequestStatus } from '../types';
-import { deleteRequest, confirmRequest, downloadExport, bulkDeleteRequests, clearAllRequests } from '../services/api';
+import { MaintenanceRequest, RequestStatus } from '../types';
+import {
+  deleteRequest,
+  confirmRequest,
+  downloadExport,
+  bulkDeleteRequests,
+  clearAllRequests,
+} from '../services/api';
 
 interface RequestsTableProps {
   requests: MaintenanceRequest[];
@@ -95,6 +94,7 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
     );
   };
 
+  // FIX: use res.deleted and res.skipped (matches backend BulkDeleteResponse)
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
     if (
@@ -109,9 +109,9 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
     setBulkNotice(null);
     try {
       const res = await bulkDeleteRequests(selectedIds);
-      let msg = `Deleted ${res.deleted_count} request(s).`;
-      if (res.skipped_count > 0) {
-        msg += ` Skipped ${res.skipped_count} request(s) currently locked in active cycles.`;
+      let msg = `Deleted ${res.deleted} request(s).`;
+      if (res.skipped && res.skipped.length > 0) {
+        msg += ` Skipped ${res.skipped.length} request(s) currently locked in active cycles.`;
       }
       setBulkNotice(msg);
       setSelectedIds([]);
@@ -216,7 +216,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Action Bar */}
       <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-black text-navy-950 flex items-center gap-2">
@@ -228,7 +227,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
           </p>
         </div>
 
-        {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
           {selectedIds.length > 0 && (
             <button
@@ -257,7 +255,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
             </button>
           )}
 
-          {/* Export to Excel */}
           <button
             onClick={() => handleExport('excel')}
             disabled={isExporting !== null}
@@ -267,7 +264,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
             <span>{isExporting === 'excel' ? 'Exporting...' : 'Export Excel'}</span>
           </button>
 
-          {/* Export to PDF */}
           <button
             onClick={() => handleExport('pdf')}
             disabled={isExporting !== null}
@@ -325,7 +321,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
         </div>
       )}
 
-      {/* Filter & Search Toolbar */}
       <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-wrap items-center gap-3">
         <div className="flex-1 min-w-[240px] relative">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -338,7 +333,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
           />
         </div>
 
-        {/* Dept Filter */}
         <select
           value={selectedDept}
           onChange={(e) => setSelectedDept(e.target.value)}
@@ -351,7 +345,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
           <option value="Operations">Operations</option>
         </select>
 
-        {/* Priority Filter */}
         <select
           value={selectedPriority}
           onChange={(e) => setSelectedPriority(e.target.value)}
@@ -363,7 +356,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
           <option value="3">P3 — Normal</option>
         </select>
 
-        {/* Status Filter */}
         <select
           value={selectedStatus}
           onChange={(e) => setSelectedStatus(e.target.value)}
@@ -380,7 +372,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
         </select>
       </div>
 
-      {/* Main Table */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
@@ -422,7 +413,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
                         isSelected ? 'bg-saffron-50/60' : req.status === 'Needs-Review' ? 'bg-amber-50/30' : ''
                       }`}
                     >
-                      {/* Checkbox */}
                       <td className="py-3 px-4">
                         <input
                           type="checkbox"
@@ -432,17 +422,14 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
                         />
                       </td>
 
-                      {/* App ID */}
                       <td className="py-3 px-4 font-mono font-bold text-navy-800">
                         {req.application_id || 'APP-LEGACY'}
                       </td>
 
-                      {/* Request ID */}
                       <td className="py-3 px-4 font-bold text-slate-900">
                         {req.request_id}
                       </td>
 
-                      {/* Department & Asset */}
                       <td className="py-3 px-4">
                         <div className="font-bold text-slate-900">{req.department}</div>
                         <div className="text-[11px] text-slate-500 truncate max-w-[140px]">
@@ -450,7 +437,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
                         </div>
                       </td>
 
-                      {/* Corridor & KM */}
                       <td className="py-3 px-4">
                         <div className="font-bold text-navy-900">{req.corridor}</div>
                         <div className="text-[11px] text-slate-500 font-mono">
@@ -458,7 +444,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
                         </div>
                       </td>
 
-                      {/* Work Nature */}
                       <td className="py-3 px-4">
                         <div className="font-medium text-slate-900 max-w-[180px] truncate" title={req.work_type}>
                           {req.work_type}
@@ -470,10 +455,8 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
                         )}
                       </td>
 
-                      {/* Priority */}
                       <td className="py-3 px-4">{getPriorityBadge(req.priority)}</td>
 
-                      {/* Window */}
                       <td className="py-3 px-4">
                         <div className="font-mono text-slate-900 font-semibold">
                           {new Date(req.earliest_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })} –{' '}
@@ -484,7 +467,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
                         </div>
                       </td>
 
-                      {/* Status */}
                       <td className="py-3 px-4">
                         {getStatusBadge(req.status)}
                         {req.missing_fields && req.missing_fields.length > 0 && (
@@ -494,7 +476,6 @@ export const RequestsTable: React.FC<RequestsTableProps> = ({
                         )}
                       </td>
 
-                      {/* Actions */}
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           {req.status === 'Needs-Review' && (

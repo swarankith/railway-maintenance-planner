@@ -2,7 +2,7 @@ export type Department = 'Engineering' | 'Electrical' | 'S&T' | 'Operations';
 
 export type PriorityLevel = 1 | 2 | 3;
 
-export type BlockType = 'Emergency' | 'Normal' | 'Corridor' | 'Rolling';
+export type BlockType = 'Emergency' | 'Normal' | 'Planned';
 
 export type RequestStatus =
   | 'Ingested'
@@ -10,30 +10,26 @@ export type RequestStatus =
   | 'Confirmed'
   | 'Optimized'
   | 'Approved'
+  | 'Rejected'
   | 'Deferred'
   | 'Manual Review'
   | 'Isolated-Emergency';
 
 export type ConflictType =
-  | 'HardPhysicalOverlap'
-  | 'PowerDisconnectionContradiction'
-  | 'ResourceContention'
-  | 'TrainMovementCollision'
-  | 'SpeedRestrictionConflict'
-  | 'StationSignalingInterlock';
+  | 'SpatialTimeKM'
+  | 'Resource'
+  | 'TrainMovement'
+  | 'Compatibility'
+  | 'SameAssetClash'
+  | 'CompetingEmergency';
 
-export type PlanStatus = 'Draft' | 'Approved' | 'Rejected';
-
-export interface User {
-  id: number;
-  username: string;
-  role: 'Chief Controller' | 'Planner' | 'Approver' | 'Operations';
-}
+export type PlanStatus = 'Generated' | 'Approved' | 'Rejected';
 
 export interface MaintenanceRequest {
   request_id: string;
   application_id?: string;
   cycle_id?: string;
+  document_type?: string;
   department: Department;
   corridor: string;
   km_start: number;
@@ -43,10 +39,9 @@ export interface MaintenanceRequest {
   duration_minutes: number;
   work_type: string;
   asset: string;
-  disconnection_required: boolean | null;
   priority: PriorityLevel;
   priority_reason?: string;
-  block_type?: string;
+  block_type?: BlockType;
   isolation_requirement?: string;
   block_shared_allowed?: boolean;
   required_resources: string[];
@@ -191,11 +186,11 @@ export interface ApprovalHistoryItem {
   total_jobs: number;
 }
 
+// FIX: aligned with backend BulkDeleteResponse (deleted, ids, skipped)
 export interface BulkDeleteResponse {
-  deleted_count: number;
-  skipped_count: number;
-  deleted_ids: string[];
-  skipped_ids: string[];
+  deleted: number;
+  ids: string[];
+  skipped: string[];
   reason?: string;
 }
 

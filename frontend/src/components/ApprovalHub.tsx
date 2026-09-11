@@ -4,13 +4,9 @@ import {
   XCircle,
   ShieldCheck,
   UserCheck,
-  Clock,
   History,
-  FileCheck,
   AlertTriangle,
-  Send,
   Download,
-  FileText,
 } from 'lucide-react';
 import { SchedulePlan, ApprovalAudit, ActiveTab } from '../types';
 import { approveSchedule, rejectSchedule, fetchAudits, downloadApprovalReport } from '../services/api';
@@ -82,11 +78,10 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
         text: `Schedule ${schedulePlan.schedule_id} approved successfully by ${userName} (${role}). Downloading official report...`,
       });
 
-      // Auto download Part F PDF report
       try {
         await downloadApprovalReport(schedulePlan.schedule_id);
       } catch {
-        // Fallback: user can click manual download
+        // User can click manual download
       }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to approve plan' });
@@ -143,7 +138,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
-      {/* Status Header */}
       <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2.5">
@@ -175,7 +169,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Download Official Report PDF Button */}
           <button
             onClick={handleDownloadPdf}
             disabled={downloadingPdf}
@@ -213,7 +206,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
         </div>
       )}
 
-      {/* Decision Controls Form */}
       <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-5">
         <h3 className="text-sm font-bold text-navy-950 flex items-center gap-2">
           <UserCheck className="w-4 h-4 text-saffron-600" />
@@ -221,7 +213,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
         </h3>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {/* Select Role */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Select Operating Role
@@ -239,7 +230,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
             </select>
           </div>
 
-          {/* User Name */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Sign-off Officer Name
@@ -254,7 +244,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
           </div>
         </div>
 
-        {/* Approval Notes */}
         <div>
           <label className="block text-xs font-semibold text-slate-700 mb-1">
             Decision Notes & Operational Remarks
@@ -268,7 +257,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
           />
         </div>
 
-        {/* Action Triggers */}
         <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
           <button
             type="button"
@@ -292,7 +280,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
         </div>
       </div>
 
-      {/* Audit Log Table */}
       <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm">
         <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -340,7 +327,6 @@ export const ApprovalHub: React.FC<ApprovalHubProps> = ({
         )}
       </div>
 
-      {/* Reject Modal */}
       {showRejectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white border border-slate-300 rounded-3xl w-full max-w-md p-6 shadow-2xl space-y-4">

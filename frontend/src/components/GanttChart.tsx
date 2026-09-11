@@ -2,24 +2,15 @@ import React, { useState, useMemo, useRef } from 'react';
 import {
   Calendar,
   Clock,
-  MapPin,
-  Layers,
   Train,
   CheckCircle2,
   AlertTriangle,
-  ArrowRight,
-  TrendingUp,
-  Sliders,
   Maximize2,
   Minimize2,
   Info,
-  ZoomIn,
-  ZoomOut,
-  HelpCircle,
-  FileText,
   ShieldAlert,
 } from 'lucide-react';
-import { SchedulePlan, MaintenanceBlock, TrainMovement, ActiveTab, MaintenanceRequest, RequestDecision } from '../types';
+import { SchedulePlan, MaintenanceBlock, TrainMovement, ActiveTab, RequestDecision } from '../types';
 
 interface GanttChartProps {
   schedulePlan: SchedulePlan | null;
@@ -34,15 +25,12 @@ export const GanttChart: React.FC<GanttChartProps> = ({
   onSelectBlock,
   setActiveTab,
 }) => {
-  const [selectedPlanType, setSelectedPlanType] = useState<'recommended' | 'alternative'>('recommended');
-  const [selectedCorridorFilter, setSelectedCorridorFilter] = useState<string>('ALL');
-  const [zoomLevel, setZoomLevel] = useState<number>(1); // 0.5x, 1x, 2x
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [selectedCorridorFilter, setSelectedCorridorFilter] = useState<string>('ALL');
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const pixelsPerHour = useMemo(() => {
-    return Math.round(60 * zoomLevel);
-  }, [zoomLevel]);
+  const pixelsPerHour = useMemo(() => Math.round(60 * zoomLevel), [zoomLevel]);
 
   const toggleFullscreen = () => {
     if (!isFullscreen) {
@@ -58,13 +46,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
     }
   };
 
-  const currentPlan = useMemo(() => {
-    if (!schedulePlan) return null;
-    if (selectedPlanType === 'alternative' && schedulePlan.alternative_plan) {
-      return schedulePlan.alternative_plan;
-    }
-    return schedulePlan;
-  }, [schedulePlan, selectedPlanType]);
+  const currentPlan = schedulePlan;
 
   const corridors = useMemo(() => {
     if (!currentPlan) return [];
@@ -82,26 +64,32 @@ export const GanttChart: React.FC<GanttChartProps> = ({
     return corridors.filter((c) => c === selectedCorridorFilter);
   }, [corridors, selectedCorridorFilter]);
 
-  // Timeline bounds calculation
   const { minTime, maxTime, totalHours } = useMemo(() => {
-    if (!currentPlan || currentPlan.blocks.length === 0) {
-      const now = new Date();
-      now.setHours(0, 0, 0, 0);
+    const now = new Date();
+    now.setMinutes(0, 0, 0);
+
+    const startTimes: number[] = [];
+    const endTimes: number[] = [];
+
+    if (currentPlan && currentPlan.blocks.length > 0) {
+      currentPlan.blocks.forEach((b) => {
+        startTimes.push(new Date(b.scheduled_start).getTime());
+        endTimes.push(new Date(b.scheduled_end).getTime());
+      });
+    }
+    if (trains.length > 0) {
+      trains.forEach((t) => {
+        startTimes.push(new Date(t.departure_time).getTime());
+        endTimes.push(new Date(t.arrival_time).getTime());
+      });
+    }
+
+    if (startTimes.length === 0) {
       return {
         minTime: now,
         maxTime: new Date(now.getTime() + 86400000),
         totalHours: 24,
       };
-    }
-
-    const startTimes = currentPlan.blocks.map((b) => new Date(b.scheduled_start).getTime());
-    const endTimes = currentPlan.blocks.map((b) => new Date(b.scheduled_end).getTime());
-
-    if (trains && trains.length > 0) {
-      trains.forEach((t) => {
-        startTimes.push(new Date(t.departure_time).getTime());
-        endTimes.push(new Date(t.arrival_time).getTime());
-      });
     }
 
     const minD = new Date(Math.min(...startTimes));
@@ -122,16 +110,14 @@ export const GanttChart: React.FC<GanttChartProps> = ({
   const hourTicks = useMemo(() => {
     const ticks = [];
     for (let i = 0; i <= totalHours; i++) {
-      const d = new Date(minTime.getTime() + i * 3600000);
-      ticks.push(d);
+      ticks.push(new Date(minTime.getTime() + i * 3600000));
     }
     return ticks;
   }, [minTime, totalHours]);
 
   const getPixelOffset = (dateStr: string) => {
     const t = new Date(dateStr).getTime();
-    const diffMs = t - minTime.getTime();
-    const diffHours = diffMs / (1000 * 60 * 60);
+    const diffHours = (t - minTime.getTime()) / (1000 * 60 * 60);
     return Math.max(0, diffHours * pixelsPerHour);
   };
 
@@ -142,11 +128,22 @@ export const GanttChart: React.FC<GanttChartProps> = ({
     return Math.max(24, diffHours * pixelsPerHour);
   };
 
-  const deferredRequests = currentPlan?.deferred_requests || [];
-  const manualReviewRequests = currentPlan?.manual_review_requests || [];
-  const isolatedEmergencyRequests = currentPlan?.isolated_emergency_requests || [];
+  const deferredRequests: RequestDecision[] = currentPlan?.deferred_requests || [];
+  const manualReviewRequests: RequestDecision[] = currentPlan?.manual_review_requests || [];
+  const isolatedEmergencyRequests: RequestDecision[] = currentPlan?.isolated_emergency_requests || [];
 
-  if (!schedulePlan || schedulePlan.blocks.length === 0) {
+  // FIX: only show the empty state if there is truly nothing to display —
+  // not just because there are no approved blocks. Deferred / manual / emergency
+  // decisions must still render their panels.
+  const hasAnyData =
+    !!currentPlan &&
+    (currentPlan.blocks.length > 0 ||
+      deferredRequests.length > 0 ||
+      manualReviewRequests.length > 0 ||
+      isolatedEmergencyRequests.length > 0 ||
+      trains.length > 0);
+
+  if (!schedulePlan || !hasAnyData) {
     return (
       <div className="text-center py-20 bg-white border border-slate-200 rounded-3xl p-8 shadow-sm">
         <Calendar className="w-14 h-14 text-slate-400 mx-auto mb-4" />
@@ -166,7 +163,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
 
   return (
     <div ref={containerRef} className={`space-y-6 ${isFullscreen ? 'bg-slate-100 p-6 overflow-y-auto' : ''}`}>
-      {/* Top Banner & Plan Switcher */}
+      {/* Top Banner */}
       <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
@@ -175,7 +172,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
             </span>
             <div>
               <h2 className="text-lg font-bold text-navy-950 flex items-center gap-2">
-                <span>{currentPlan?.plan_name}</span>
+                <span>{currentPlan?.plan_name || 'Schedule Plan'}</span>
                 {currentPlan?.is_recommended && (
                   <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
                     Recommended Plan
@@ -189,9 +186,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
           </div>
         </div>
 
-        {/* Controls: Zoom, Fullscreen, Plan Switcher */}
         <div className="flex items-center gap-2.5 flex-wrap">
-          {/* Zoom Buttons */}
           <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
             <button
               onClick={() => setZoomLevel(0.5)}
@@ -219,7 +214,6 @@ export const GanttChart: React.FC<GanttChartProps> = ({
             </button>
           </div>
 
-          {/* Fullscreen Button */}
           <button
             onClick={toggleFullscreen}
             title={isFullscreen ? 'Exit Full Screen' : 'Full Screen'}
@@ -227,31 +221,6 @@ export const GanttChart: React.FC<GanttChartProps> = ({
           >
             {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
-
-          {schedulePlan.alternative_plan && (
-            <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
-              <button
-                onClick={() => setSelectedPlanType('recommended')}
-                className={`px-3 py-1.5 rounded-lg font-bold transition ${
-                  selectedPlanType === 'recommended'
-                    ? 'bg-navy-800 text-white shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Plan A (Max Bundling)
-              </button>
-              <button
-                onClick={() => setSelectedPlanType('alternative')}
-                className={`px-3 py-1.5 rounded-lg font-bold transition ${
-                  selectedPlanType === 'alternative'
-                    ? 'bg-navy-800 text-white shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Plan B (Rapid Turnaround)
-              </button>
-            </div>
-          )}
 
           <button
             onClick={() => setActiveTab('approval')}
@@ -263,15 +232,15 @@ export const GanttChart: React.FC<GanttChartProps> = ({
         </div>
       </div>
 
-      {/* KPI Cards Banner */}
+      {/* KPI Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm">
-          <div className="text-slate-500 text-[10px] uppercase font-bold tracking-wider">Jobs Scheduled</div>
+          <div className="text-slate-500 text-[10px] uppercase font-bold tracking-wider">Jobs Handled</div>
           <div className="text-navy-950 font-mono font-black text-xl mt-1">
             {currentPlan?.total_jobs_completed} / {currentPlan?.total_jobs_requested}
           </div>
           <div className="text-[10px] text-emerald-700 font-bold mt-0.5">
-            Active Requests Packaged
+            Approved + Isolated Emergency
           </div>
         </div>
 
@@ -298,7 +267,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
         <div className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm">
           <div className="text-slate-500 text-[10px] uppercase font-bold tracking-wider">Bundling Synergy</div>
           <div className="text-saffron-700 font-mono font-black text-xl mt-1">
-            {currentPlan?.bundling_efficiency_percentage.toFixed(1)}%
+            {(currentPlan?.bundling_efficiency_percentage || 0).toFixed(1)}%
           </div>
           <div className="text-[10px] text-saffron-800 font-semibold mt-0.5">
             Closure Consolidation
@@ -306,7 +275,6 @@ export const GanttChart: React.FC<GanttChartProps> = ({
         </div>
       </div>
 
-      {/* Rationale Callout */}
       <div className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm flex items-start gap-3">
         <Info className="w-5 h-5 text-saffron-600 shrink-0 mt-0.5" />
         <div className="text-xs text-slate-700 leading-relaxed">
@@ -315,7 +283,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
         </div>
       </div>
 
-      {/* Filter and Legend Bar */}
+      {/* Filter and Legend */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-2 text-xs">
           <span className="text-slate-700 font-bold">Filter Corridor:</span>
@@ -326,30 +294,27 @@ export const GanttChart: React.FC<GanttChartProps> = ({
           >
             <option value="ALL">All Corridors ({corridors.length})</option>
             {corridors.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
+              <option key={c} value={c}>{c}</option>
             ))}
           </select>
         </div>
 
-        {/* Legend */}
         <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold text-slate-600">
           <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded bg-blue-700 border border-blue-900"></div>
-            <span>Engineering (Civil)</span>
+            <span>Engineering</span>
           </div>
           <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded bg-amber-600 border border-amber-700"></div>
-            <span>Electrical (TRD)</span>
+            <span>Electrical</span>
           </div>
           <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded bg-purple-700 border border-purple-900"></div>
-            <span>Signal & Telecom</span>
+            <span>S&T</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded bg-gradient-to-r from-navy-800 to-saffron-600 border border-saffron-400"></div>
-            <span className="text-navy-950 font-bold">Bundled Joint Block (28px)</span>
+            <div className="w-3 h-3 rounded bg-rose-700 border border-rose-900"></div>
+            <span className="text-rose-800 font-bold">Isolated Emergency</span>
           </div>
           <div className="flex items-center gap-1.5">
             <div
@@ -359,24 +324,20 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                   'repeating-linear-gradient(45deg, #cbd5e1, #cbd5e1 4px, #f1f5f9 4px, #f1f5f9 8px)',
               }}
             ></div>
-            <span className="text-slate-700 font-bold">Train Movements (16px Hatched)</span>
+            <span className="text-slate-700 font-bold">Train Movements</span>
           </div>
         </div>
       </div>
 
-      {/* Main Gantt Timeline View with Sticky Corridor Column */}
+      {/* Gantt Timeline */}
       <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto relative">
           <div style={{ width: `${totalWidthPx + 160}px` }}>
-            {/* Header Row */}
             <div className="flex border-b border-slate-200 bg-navy-800 text-[11px] font-mono text-white h-12 sticky top-0 z-30">
-              {/* Sticky Corridor Column Header */}
               <div className="w-[160px] shrink-0 px-3 py-2 font-sans font-bold border-r border-navy-700 flex items-center justify-between text-white sticky left-0 bg-navy-800 z-40 shadow-sm">
                 <span>Corridor</span>
                 <span className="text-[9px] text-white/80">Lanes</span>
               </div>
-
-              {/* Time Ruler */}
               <div className="flex-1 relative h-12 overflow-hidden">
                 {hourTicks.map((tick, idx) => {
                   const leftPx = idx * pixelsPerHour;
@@ -398,7 +359,6 @@ export const GanttChart: React.FC<GanttChartProps> = ({
               </div>
             </div>
 
-            {/* Corridor Rows */}
             <div className="divide-y divide-slate-200">
               {filteredCorridors.map((corridor) => {
                 const corridorBlocks = (currentPlan?.blocks || []).filter((b) => b.corridor === corridor);
@@ -406,20 +366,15 @@ export const GanttChart: React.FC<GanttChartProps> = ({
 
                 return (
                   <div key={corridor} className="flex h-[56px] hover:bg-slate-50/60 transition group">
-                    {/* Sticky Left Corridor Cell (160px) */}
                     <div className="w-[160px] shrink-0 px-3 py-1.5 border-r border-slate-200 bg-slate-50 flex flex-col justify-center sticky left-0 z-20 shadow-sm">
-                      <div className="font-extrabold text-navy-950 text-xs truncate" title={corridor}>
-                        {corridor}
-                      </div>
+                      <div className="font-extrabold text-navy-950 text-xs truncate" title={corridor}>{corridor}</div>
                       <div className="text-[9px] text-slate-500 font-mono mt-0.5 flex items-center justify-between">
                         <span>{corridorBlocks.length} Blocks</span>
                         <span>{corridorTrains.length} Trains</span>
                       </div>
                     </div>
 
-                    {/* Timeline Canvas with Maintenance Lane (28px) and Train Lane (16px) */}
                     <div className="flex-1 relative h-[56px] overflow-hidden bg-white">
-                      {/* Vertical Hour Grid Lines */}
                       {hourTicks.map((tick, idx) => {
                         const leftPx = idx * pixelsPerHour;
                         return (
@@ -431,14 +386,14 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                         );
                       })}
 
-                      {/* Maintenance Lane (Top: 4px, Height: 28px) */}
                       <div className="absolute top-1 left-0 right-0 h-[28px]">
                         {corridorBlocks.map((block) => {
                           const left = getPixelOffset(block.scheduled_start);
                           const width = getPixelWidth(block.scheduled_start, block.scheduled_end);
                           const isMultiDept = block.departments.length > 1;
-
-                          const isEmergency = block.block_id.startsWith('EMG-BLK') || block.isolation_applied?.includes('Emergency');
+                          const isEmergency =
+                            block.block_id.startsWith('EMG-BLK') ||
+                            (block.isolation_applied || '').toLowerCase().includes('emergency');
 
                           return (
                             <div
@@ -469,7 +424,6 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                         })}
                       </div>
 
-                      {/* Train Lane (Top: 34px, Height: 16px) with Diagonal Hatched Background */}
                       <div
                         className="absolute top-[34px] left-0 right-0 h-[16px] border-t border-slate-200"
                         style={{
@@ -487,7 +441,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                             <div
                               key={train.train_id || tNum}
                               style={{ left: `${left}px`, width: `${width}px` }}
-                              title={`Train ${tNum} (${tName}) | ${train.departure_time.slice(11, 16)} - ${train.arrival_time.slice(11, 16)} | Speed: ${train.speed_kmh || 80} km/h`}
+                              title={`Train ${tNum} (${tName}) | ${train.departure_time.slice(11, 16)} - ${train.arrival_time.slice(11, 16)}`}
                               className="absolute top-0 bottom-0 bg-slate-700 border border-slate-800 rounded px-1 flex items-center gap-1 text-[9px] text-white overflow-hidden shadow-xs cursor-default"
                             >
                               <Train className="w-2.5 h-2.5 shrink-0 text-saffron-300" />
@@ -505,9 +459,9 @@ export const GanttChart: React.FC<GanttChartProps> = ({
         </div>
       </div>
 
-      {/* Panels for Deferred, Manual Review, and Isolated Emergency Requests */}
+      {/* Panels */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Deferred Requests */}
+        {/* Deferred */}
         <div className="bg-white border border-amber-200 rounded-3xl p-5 shadow-sm space-y-3 flex flex-col justify-between">
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -532,10 +486,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
             ) : (
               <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
                 {deferredRequests.map((dec: RequestDecision) => (
-                  <div
-                    key={dec.request_id}
-                    className="p-2.5 bg-amber-50/60 border border-amber-200 rounded-xl flex items-start justify-between gap-2 text-xs"
-                  >
+                  <div key={dec.request_id} className="p-2.5 bg-amber-50/60 border border-amber-200 rounded-xl flex items-start justify-between gap-2 text-xs">
                     <div className="space-y-0.5">
                       <div className="font-bold text-navy-950 flex items-center gap-1.5">
                         <span>{dec.request_id}</span>
@@ -545,9 +496,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                           </span>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-600 leading-tight">
-                        {dec.reason}
-                      </div>
+                      <div className="text-[11px] text-slate-600 leading-tight">{dec.reason}</div>
                     </div>
                     {dec.retry_count !== undefined && dec.retry_count > 0 && (
                       <span className="font-mono text-[10px] font-bold text-amber-800 bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded shrink-0">
@@ -561,7 +510,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
           </div>
         </div>
 
-        {/* Manual Review Requests */}
+        {/* Manual Review */}
         <div className="bg-white border border-rose-200 rounded-3xl p-5 shadow-sm space-y-3 flex flex-col justify-between">
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -586,10 +535,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
             ) : (
               <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
                 {manualReviewRequests.map((dec: RequestDecision) => (
-                  <div
-                    key={dec.request_id}
-                    className="p-2.5 bg-rose-50/60 border border-rose-200 rounded-xl flex items-start justify-between gap-2 text-xs"
-                  >
+                  <div key={dec.request_id} className="p-2.5 bg-rose-50/60 border border-rose-200 rounded-xl flex items-start justify-between gap-2 text-xs">
                     <div className="space-y-0.5">
                       <div className="font-bold text-navy-950 flex items-center gap-1.5">
                         <span>{dec.request_id}</span>
@@ -597,9 +543,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                           Manual Review
                         </span>
                       </div>
-                      <div className="text-[11px] text-slate-600 leading-tight">
-                        {dec.reason}
-                      </div>
+                      <div className="text-[11px] text-slate-600 leading-tight">{dec.reason}</div>
                     </div>
                     {dec.retry_count !== undefined && dec.retry_count >= 3 && (
                       <span className="font-mono text-[10px] font-bold text-rose-700 bg-rose-100 border border-rose-300 px-1.5 py-0.5 rounded shrink-0">
@@ -638,10 +582,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
             ) : (
               <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
                 {isolatedEmergencyRequests.map((dec: RequestDecision) => (
-                  <div
-                    key={dec.request_id}
-                    className="p-2.5 bg-red-50/70 border border-red-200 rounded-xl flex items-start justify-between gap-2 text-xs"
-                  >
+                  <div key={dec.request_id} className="p-2.5 bg-red-50/70 border border-red-200 rounded-xl flex items-start justify-between gap-2 text-xs">
                     <div className="space-y-0.5">
                       <div className="font-bold text-navy-950 flex items-center gap-1.5">
                         <span>{dec.request_id}</span>
@@ -649,9 +590,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
                           P1 Emergency
                         </span>
                       </div>
-                      <div className="text-[11px] text-slate-700 leading-tight">
-                        {dec.reason}
-                      </div>
+                      <div className="text-[11px] text-slate-700 leading-tight">{dec.reason}</div>
                     </div>
                     <span className="font-mono text-[9px] font-bold text-red-700 bg-white border border-red-300 px-1.5 py-0.5 rounded shrink-0">
                       Sign-off Req.

@@ -1,14 +1,20 @@
 """
-Deterministic Batch Decision Engine for Railway Maintenance Block Scheduling (Phase 2 Final v6).
-Implements the exact 8-step specification:
-- Step 0: Assemble batch preserving retry_count, duplicate detection, cycle creation.
-- Step 1: Emergency lane (block_type == Emergency only, buffered reservation [isolated_at - 15m, latest_end + 15m], competing emergency detection).
-- Step 2: Category split (RapidFuzz >= 85 catalog matching; unknown -> Manual Review; Cat B fast path with 3 checks).
-- Step 3: Overlap grouping (Connected components on corridor + buffered time + min 0.1 KM).
-- Step 4: Same-asset hard clash (Rule C: exact match on normalized work_type & asset -> exclude from bundling).
-- Step 5: Strict capped bundling (size 1-3, all pairs compatible, quality score formula, bundle audit trail on deferral).
-- Step 6: Priority walk (score = (4-prio)*100 + max(0, 7-due)*10, order: emergency -> train -> resource -> deps, greedy best fit 15m).
-- Step 7: Deferred retry cap (< 3 -> Deferred + increment, >= 3 -> Manual Review).
+Deterministic Batch Decision Engine for Railway Maintenance Block Scheduling (Phase 2 Final v7).
+
+Fixes applied (v7):
+1. Removed the import of `needs_disconnection` and `resource_identity_clash` from optimizer.py.
+   Local, correct versions are used instead.
+2. `requests_pairwise_compatible` no longer uses the department whitelist gate.
+   It matches the compatibility verdict used by `conflicts.py`:
+   Category B + anything -> compatible; Category A + Category A -> compatible EXCEPT the 4 pairs.
+3. True-tie rule now requires that two overlapping units CANNOT be bundled
+   (i.e., they fail every compatibility check). Physical overlap + same priority + same due
+   date is NOT enough to declare a tie.
+4. Emergency reservation window is now based on the emergency request's own
+   [earliest_start - 15min, latest_end + 15min] instead of stretching from "now".
+   This stops emergencies from over-reserving large swaths of corridor time.
+5. Category B fast path now also checks overlap with emergency reservations before
+   approving. If it overlaps an active emergency reservation, it is routed to Step 3.
 """
 import itertools
 import math
@@ -24,7 +30,6 @@ from backend.config import (
     CATEGORY_A_CATALOG,
     CATEGORY_B_CATALOG,
     INCOMPATIBLE_CAT_A_PAIRS,
-    is_department_pair_compatible,
 )
 from backend.models import (
     MaintenanceBlock,
@@ -49,13 +54,16 @@ from backend.engine.conflicts import (
     MIN_KM_OVERLAP,
 )
 from backend.engine.explainability import generate_block_explanation, generate_plan_summary
-from backend.engine.optimizer import needs_disconnection, resource_identity_clash
 
+
+# ==========================================================================
+# Category classification (Step 2)
+# ==========================================================================
 
 def classify_work_type(work_type: str) -> Tuple[Optional[str], Optional[str], float]:
     """
-    Classifies work type using RapidFuzz token_sort_ratio >= 85 against A.1 catalogs.
-    Returns (category: 'A'|'B'|None, matched_canonical_name, score).
+    Classifies work type using RapidFuzz token_sort_ratio >= 85 against catalogs.
+    Returns (category: 'A' | 'B' | None, matched_canonical_name, score).
     """
     if not work_type:
         return None, None, 0.0
@@ -85,27 +93,40 @@ def classify_work_type(work_type: str) -> Tuple[Optional[str], Optional[str], fl
     if best_score >= 85.0:
         return best_cat, best_match, best_score
 
-    # Check common synonyms/abbreviations in Indian Railways parlance
-    if any(k in norm_input for k in ["rail renewal", "rail replacement", "tamping", "welding", "sleeper", "ohe", "catenary", "point machine", "grinding", "grind"]):
+    # Common Indian Railways synonym fallback
+    if any(k in norm_input for k in [
+        "rail renewal", "rail replacement", "tamping", "welding", "sleeper",
+        "ohe", "catenary", "point machine", "grinding", "grind",
+    ]):
         return "A", norm_input, 86.0
-    if any(k in norm_input for k in ["vegetation", "cess", "relay room", "gate", "patrolling", "routine inspection", "drain", "desilt", "cleaning"]):
+    if any(k in norm_input for k in [
+        "vegetation", "cess", "relay room", "gate", "patrolling",
+        "routine inspection", "drain", "desilt", "cleaning",
+    ]):
         return "B", norm_input, 86.0
 
     return None, None, best_score
 
 
 def needs_disconnection(request: MaintenanceRequest) -> Optional[bool]:
-    """Determines if request requires track/power disconnection (Category A). Unknown -> None."""
+    """
+    Returns True if the request requires track/power disconnection (Category A),
+    False if it does not (Category B), None if the work type is unknown.
+    """
     cat, _, _ = classify_work_type(request.work_type)
     if cat == "A":
         return True
-    elif cat == "B":
+    if cat == "B":
         return False
     return None
 
 
+# ==========================================================================
+# Compatibility (Part A.2)
+# ==========================================================================
+
 def are_work_types_compatible_cat_a(w1: str, w2: str) -> bool:
-    """Checks the 4 incompatible Category A pairs (Part A.2)."""
+    """Checks whether two Category A work types are compatible (i.e., not in the 4 exception pairs)."""
     _, m1, _ = classify_work_type(w1)
     _, m2, _ = classify_work_type(w2)
     nm1 = normalize_string_exact(m1 or w1)
@@ -119,18 +140,23 @@ def are_work_types_compatible_cat_a(w1: str, w2: str) -> bool:
     return True
 
 
-def requests_pairwise_compatible(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
+def requests_pairwise_compatible(
+    r1: MaintenanceRequest,
+    r2: MaintenanceRequest,
+) -> bool:
     """
-    Checks compatibility per Part A.2:
-    - Cat B + anything -> combinable (subject to resource conflicts).
-    - Cat A + Cat A -> combinable EXCEPT 4 pairs.
-    - Departments must be compatible.
+    Part A.2 compatibility check, aligned with conflicts.py:
+    - Category B + anything -> compatible (resource conflicts still apply, checked elsewhere).
+    - Category A + Category A -> compatible UNLESS the pair is one of the 4 exceptions.
+    - Departments are NOT gated by a whitelist here; the only department-level blocker
+      is the work-type exception rule above, matching the conflict-analysis verdict.
     """
-    if not is_department_pair_compatible(r1.department, r2.department):
-        return False
-
     cat1, _, _ = classify_work_type(r1.work_type)
     cat2, _, _ = classify_work_type(r2.work_type)
+
+    # Unknown category on either side -> cannot be safely bundled automatically.
+    if cat1 is None or cat2 is None:
+        return False
 
     if cat1 == "A" and cat2 == "A":
         if not are_work_types_compatible_cat_a(r1.work_type, r2.work_type):
@@ -139,13 +165,15 @@ def requests_pairwise_compatible(r1: MaintenanceRequest, r2: MaintenanceRequest)
     return True
 
 
+# ==========================================================================
+# Rule C — same-asset hard clash (Step 4)
+# ==========================================================================
+
 def is_rule_c_clash(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
     """
-    Rule C: Same-asset hard clash using fuzzy matching.
-    Work type comparison: fuzzy similarity score >= 85.0.
-    Asset comparison: identical, substring containment, or fuzzy similarity score >= 85.0.
-    Both conditions must hold. If either work type or asset is missing, no clash is reported.
-    Also requires physical overlap: same normalized corridor, overlapping (buffered) time, overlapping KM.
+    Rule C: same normalized work_type AND same normalized asset
+    (exact match after lowercasing + stripping punctuation) AND
+    overlapping corridor + buffered time + overlapping KM.
     """
     if not r1.work_type or not r2.work_type or not r1.asset or not r2.asset:
         return False
@@ -165,16 +193,11 @@ def is_rule_c_clash(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
     if not km_ranges_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end):
         return False
 
-    work_score = fuzz.token_sort_ratio(w1, w2)
-    work_match = work_score >= 85.0
-
-    asset_match = (a1 == a2) or (a1 in a2) or (a2 in a1) or (fuzz.token_sort_ratio(a1, a2) >= 85.0)
-
-    return work_match and asset_match
+    return w1 == w2 and a1 == a2
 
 
 def has_resource_conflict(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
-    """Checks resource overlap using normalized resource names."""
+    """Checks overlapping buffered times AND shared normalized resource names."""
     res1 = {normalize_resource_name(x) for x in r1.required_resources if x}
     res2 = {normalize_resource_name(x) for x in r2.required_resources if x}
     if not res1.intersection(res2):
@@ -182,8 +205,14 @@ def has_resource_conflict(r1: MaintenanceRequest, r2: MaintenanceRequest) -> boo
     return buffered_intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end)
 
 
-def build_connected_overlap_groups(requests: Sequence[MaintenanceRequest]) -> List[List[MaintenanceRequest]]:
-    """Step 3: Connected components on corridor + overlapping (buffered) time + overlapping (>=0.1km) KM."""
+# ==========================================================================
+# Step 3 — Connected overlap groups
+# ==========================================================================
+
+def build_connected_overlap_groups(
+    requests: Sequence[MaintenanceRequest],
+) -> List[List[MaintenanceRequest]]:
+    """Connected components on same corridor + overlapping buffered time + overlapping KM (>= 0.1)."""
     remaining = set(range(len(requests)))
     groups: List[List[MaintenanceRequest]] = []
 
@@ -209,10 +238,13 @@ def build_connected_overlap_groups(requests: Sequence[MaintenanceRequest]) -> Li
     return groups
 
 
+# ==========================================================================
+# Step 5 — Strict capped bundling (quality-score winner)
+# ==========================================================================
+
 def calculate_bundle_quality(bundle: Sequence[MaintenanceRequest]) -> float:
     """
-    quality = (members*10) + (priority_weight/members if members>0 else 0) - (km_span*0.5) - (time_span_minutes/60)
-    where priority_weight = sum of (4 - priority) across members.
+    quality = members*10 + priority_weight/members - km_span*0.5 - time_span_minutes/60
     """
     members = len(bundle)
     if members == 0:
@@ -221,28 +253,25 @@ def calculate_bundle_quality(bundle: Sequence[MaintenanceRequest]) -> float:
     min_km = min(r.km_start for r in bundle)
     max_km = max(r.km_end for r in bundle)
     km_span = max(0.0, max_km - min_km)
-    
-    # Common or spanned time
+
     start = max(r.earliest_start for r in bundle)
     end = min(r.latest_end for r in bundle)
     if start >= end:
-        # Feasible common window does not exist
         return -9999.0
+
     time_span_minutes = max(r.duration_minutes for r in bundle)
-
-    quality = (members * 10.0) + (priority_weight / members) - (km_span * 0.5) - (time_span_minutes / 60.0)
-    return quality
+    return (members * 10.0) + (priority_weight / members) - (km_span * 0.5) - (time_span_minutes / 60.0)
 
 
-def construct_strict_capped_bundles(group: Sequence[MaintenanceRequest], allow_bundling: bool) -> List[List[MaintenanceRequest]]:
+def construct_strict_capped_bundles(
+    group: Sequence[MaintenanceRequest],
+    allow_bundling: bool,
+) -> List[List[MaintenanceRequest]]:
     """
-    Step 5: Strict capped bundling (size 1 to 3).
-    Candidates of size 1-3; valid only if:
-    - all pairs compatible
-    - no Rule C clash
-    - no resource conflict
-    - common feasible interval exists
-    Highest quality wins.
+    Build candidate bundles of size 1 to 3.
+    Valid bundle requires: all pairs compatible, no Rule C clash, no resource conflict,
+    common feasible window of at least the max member duration.
+    Highest quality-score bundle wins.
     """
     unused = list(group)
     bundles: List[List[MaintenanceRequest]] = []
@@ -254,7 +283,6 @@ def construct_strict_capped_bundles(group: Sequence[MaintenanceRequest], allow_b
         if allow_bundling and len(unused) > 1:
             for size in (3, 2):
                 for comb in itertools.combinations(unused, size):
-                    # Validate all pairs
                     valid = True
                     for a, b in itertools.combinations(comb, 2):
                         if not (a.block_shared_allowed and b.block_shared_allowed):
@@ -269,11 +297,9 @@ def construct_strict_capped_bundles(group: Sequence[MaintenanceRequest], allow_b
                         if has_resource_conflict(a, b):
                             valid = False
                             break
-
                     if not valid:
                         continue
 
-                    # Common feasible window check
                     common_start = max(r.earliest_start for r in comb)
                     common_end = min(r.latest_end for r in comb)
                     needed_dur = max(r.duration_minutes for r in comb)
@@ -293,6 +319,10 @@ def construct_strict_capped_bundles(group: Sequence[MaintenanceRequest], allow_b
     return bundles
 
 
+# ==========================================================================
+# Step 6 — Greedy best-fit slot finder
+# ==========================================================================
+
 def find_greedy_best_fit_gap(
     bundle: Sequence[MaintenanceRequest],
     corridor: str,
@@ -300,12 +330,12 @@ def find_greedy_best_fit_gap(
     earliest_start: datetime,
     latest_end: datetime,
     reserved_slots: List[Dict],
-    trains: List[TrainMovement]
+    trains: List[TrainMovement],
 ) -> Optional[datetime]:
     """
-    Sliding start in 15-min increments from earliest_start up to latest_end - duration.
-    Greedy best-fit: smallest free gap fitting [earliest_start, latest_end - duration].
-    Tie-break: equal-length gaps -> earliest start time wins.
+    Slide start time in 15-min increments from earliest_start to latest_end - duration.
+    Return the first (earliest) slot that has no corridor/KM overlap with a reserved slot
+    and no train conflict (for Category A work).
     """
     step = timedelta(minutes=15)
     dur = timedelta(minutes=duration_min)
@@ -318,26 +348,19 @@ def find_greedy_best_fit_gap(
     needs_disc = any(needs_disconnection(r) for r in bundle)
 
     current = earliest_start
-    best_start: Optional[datetime] = None
-
     while current <= max_start:
         c_end = current + dur
 
-        # Check conflict with reserved slots (including emergency reservations)
         has_slot_conflict = False
         for slot in reserved_slots:
             if slot["corridor"].strip().upper() != corridor.strip().upper():
                 continue
-            # Slot buffer check
-            slot_s = slot["buffer_start"]
-            slot_e = slot["buffer_end"]
-            if raw_intervals_overlap(current, c_end, slot_s, slot_e):
+            if raw_intervals_overlap(current, c_end, slot["buffer_start"], slot["buffer_end"]):
                 if km_ranges_overlap(min_km, max_km, slot["km_start"], slot["km_end"]):
                     has_slot_conflict = True
                     break
 
         if not has_slot_conflict:
-            # If Category A, check train movements
             has_train_conflict = False
             if needs_disc:
                 for train in trains:
@@ -349,28 +372,32 @@ def find_greedy_best_fit_gap(
                             break
 
             if not has_train_conflict:
-                best_start = current
-                break  # Earliest start wins tie-break
+                return current
 
         current += step
 
-    return best_start
+    return None
 
+
+# ==========================================================================
+# Main deterministic batch engine
+# ==========================================================================
 
 def solve_maintenance_schedule(
     requests: List[MaintenanceRequest],
     train_movements: Optional[List[TrainMovement]] = None,
     mode: str = "recommended",
-    cycle_id: Optional[str] = None
+    cycle_id: Optional[str] = None,
 ) -> SchedulePlan:
     """
-    Executes the authoritative 8-step Deterministic Batch Engine (Phase 2 Final v6).
+    Executes the deterministic 8-step batch engine (Phase 2 Final v7).
     """
     trains = train_movements or []
     cycle = cycle_id or f"CYC-{uuid.uuid4().hex[:8].upper()}"
 
-    # Step 0: Assemble batch & deduplicate
-    # Flagged unconfirmed duplicates never enter Step 1+
+    # ----------------------------------------------------------------------
+    # Step 0 — Assemble batch + deduplicate
+    # ----------------------------------------------------------------------
     eligible_raw = [r for r in requests if r.status.value not in {"Rejected", "Approved"}]
     eligible: List[MaintenanceRequest] = []
     unconfirmed_duplicates: Set[str] = set()
@@ -379,7 +406,6 @@ def solve_maintenance_schedule(
         is_dup = False
         for j, r2 in enumerate(eligible_raw):
             if i != j and is_duplicate_request(r1, r2):
-                # Unconfirmed duplicate
                 if r1.status.value != "Confirmed":
                     is_dup = True
                     unconfirmed_duplicates.add(r1.request_id)
@@ -389,10 +415,8 @@ def solve_maintenance_schedule(
 
     decisions: Dict[str, RequestDecision] = {}
     blocks: List[MaintenanceBlock] = []
-    # Reserved slots: list of dicts with corridor, buffer_start, buffer_end, true_start, true_end, km_start, km_end, is_emergency, emergency_ids
     reserved_slots: List[Dict] = []
 
-    # Record unconfirmed duplicates as Needs-Review / Manual Review
     for dup_id in unconfirmed_duplicates:
         r = next(x for x in eligible_raw if x.request_id == dup_id)
         decisions[r.request_id] = RequestDecision(
@@ -403,24 +427,22 @@ def solve_maintenance_schedule(
             priority=r.priority,
             retry_count=r.retry_count,
             reason="Flagged duplicate proposal (token similarity >= 90%). Requires human confirmation before batch inclusion.",
-            train_window_checked=False
+            train_window_checked=False,
         )
 
-    # ==========================================================================
-    # Step 1 — Emergency Lane (block_type == Emergency, always first)
-    # ==========================================================================
-    # Note: priority == 1 with block_type != Emergency is NOT isolated here!
+    # ----------------------------------------------------------------------
+    # Step 1 — Emergency lane (block_type == Emergency only)
+    # ----------------------------------------------------------------------
     emergencies = [r for r in eligible if r.block_type.value == "Emergency"]
     now_ist = datetime.now(APP_TIMEZONE)
 
     for em in emergencies:
-        # Check competing emergencies: 2+ overlapping emergencies
         competing = [
             o.request_id for o in emergencies
-            if o.request_id != em.request_id and
-            o.corridor.strip().upper() == em.corridor.strip().upper() and
-            buffered_intervals_overlap(em.earliest_start, em.latest_end, o.earliest_start, o.latest_end) and
-            km_ranges_overlap(em.km_start, em.km_end, o.km_start, o.km_end)
+            if o.request_id != em.request_id
+            and o.corridor.strip().upper() == em.corridor.strip().upper()
+            and buffered_intervals_overlap(em.earliest_start, em.latest_end, o.earliest_start, o.latest_end)
+            and km_ranges_overlap(em.km_start, em.km_end, o.km_start, o.km_end)
         ]
 
         disconn = needs_disconnection(em)
@@ -437,10 +459,9 @@ def solve_maintenance_schedule(
             priority=em.priority,
             retry_count=em.retry_count,
             reason=reason,
-            train_window_checked=False
+            train_window_checked=False,
         )
 
-        # Construct visible emergency schedule block (distinguishable EMG-BLK id)
         em_start = em.earliest_start
         em_end = em.earliest_start + timedelta(minutes=em.duration_minutes)
         em_block = MaintenanceBlock(
@@ -458,13 +479,14 @@ def solve_maintenance_schedule(
             utilization_score=100.0,
             time_saved_minutes=0,
             bundling_explanation=f"EMERGENCY ISOLATION: {reason}",
-            requests=[em]
+            requests=[em],
         )
         blocks.append(em_block)
 
-        # Buffered reservation to BLOCK non-emergencies: [isolated_at - 15min, latest_end + 15min]
-        res_start = (em.earliest_start if em.earliest_start < now_ist else now_ist) - TIME_BUFFER
+        # FIX (v7): buffered reservation based on the emergency's own window, NOT "now".
+        res_start = em.earliest_start - TIME_BUFFER
         res_end = em.latest_end + TIME_BUFFER
+
         reserved_slots.append({
             "corridor": em.corridor,
             "buffer_start": res_start,
@@ -475,20 +497,31 @@ def solve_maintenance_schedule(
             "km_end": max(em.km_start, em.km_end),
             "is_emergency": True,
             "emergency_ids": [em.request_id] + competing,
-            "requests": [em]
+            "requests": [em],
         })
 
-    # ==========================================================================
-    # Step 2 — Category Split (with emergency-aware fast path)
-    # ==========================================================================
+    # ----------------------------------------------------------------------
+    # Step 2 — Category split (emergency-aware fast path)
+    # ----------------------------------------------------------------------
     non_emergencies = [r for r in eligible if r.request_id not in decisions]
     step3_candidates: List[MaintenanceRequest] = []
-    fast_path_approved_cat_b: List[MaintenanceRequest] = []
+
+    def overlaps_active_emergency(r: MaintenanceRequest) -> List[str]:
+        """Return IDs of emergency reservations this request overlaps (buffered)."""
+        hit_ids: List[str] = []
+        for slot in reserved_slots:
+            if not slot.get("is_emergency"):
+                continue
+            if slot["corridor"].strip().upper() != r.corridor.strip().upper():
+                continue
+            if raw_intervals_overlap(r.earliest_start, r.latest_end, slot["buffer_start"], slot["buffer_end"]):
+                if km_ranges_overlap(r.km_start, r.km_end, slot["km_start"], slot["km_end"]):
+                    hit_ids.extend(slot.get("emergency_ids", []))
+        return list(dict.fromkeys(hit_ids))
 
     for r in non_emergencies:
         cat, canonical_match, score = classify_work_type(r.work_type)
 
-        # Unknown work type -> Manual Review, disconnection_required = True (track-touching safety precaution)
         if cat is None:
             decisions[r.request_id] = RequestDecision(
                 request_id=r.request_id,
@@ -498,21 +531,19 @@ def solve_maintenance_schedule(
                 priority=r.priority,
                 retry_count=r.retry_count,
                 reason=f"Manual Review: Unrecognised work type '{r.work_type}' (similarity score: {score:.1f}%). Safety classification required.",
-                train_window_checked=False
+                train_window_checked=False,
             )
             continue
 
         if cat == "B":
-            # Condition (a): no resource conflict
             res_clash = any(
                 has_resource_conflict(r, o)
                 for o in non_emergencies if o.request_id != r.request_id
             )
+            em_overlap = overlaps_active_emergency(r)
 
-            # Fast path for Category B without resource clash:
-            # Always mark disconnection as not required and train window not checked
-            if not res_clash:
-                fast_path_approved_cat_b.append(r)
+            # FIX (v7): Category B fast path also blocks if it overlaps an emergency reservation.
+            if not res_clash and not em_overlap:
                 b_start = r.earliest_start
                 b_end = r.earliest_start + timedelta(minutes=r.duration_minutes)
                 block_b = MaintenanceBlock(
@@ -530,7 +561,7 @@ def solve_maintenance_schedule(
                     utilization_score=100.0,
                     time_saved_minutes=0,
                     bundling_explanation="Category B off-track routine work approved on fast path.",
-                    requests=[r]
+                    requests=[r],
                 )
                 blocks.append(block_b)
                 reserved_slots.append({
@@ -542,7 +573,7 @@ def solve_maintenance_schedule(
                     "km_start": min(r.km_start, r.km_end),
                     "km_end": max(r.km_start, r.km_end),
                     "is_emergency": False,
-                    "requests": [r]
+                    "requests": [r],
                 })
 
                 decisions[r.request_id] = RequestDecision(
@@ -552,42 +583,35 @@ def solve_maintenance_schedule(
                     disconnection_required=False,
                     priority=r.priority,
                     retry_count=r.retry_count,
-                    reason="Category B fast path approved: no resource clash. Disconnection not required.",
-                    train_window_checked=False
+                    reason="Category B fast path approved: no resource clash and no emergency overlap. Disconnection not required.",
+                    train_window_checked=False,
                 )
             else:
-                # Resource clash -> route to Step 3
                 step3_candidates.append(r)
         else:
-            # Category A -> Step 3
             step3_candidates.append(r)
 
-    # ==========================================================================
-    # Step 3, 4, 5, 6, 7 — Connected Overlap Groups, Rule C, Bundling, Walk & Retry
-    # ==========================================================================
+    # ----------------------------------------------------------------------
+    # Steps 3–7 for Category A and conflicted Category B
+    # ----------------------------------------------------------------------
     for group in build_connected_overlap_groups(step3_candidates):
-        # Step 4: Same-asset hard clash (Rule C) within each group
         rule_c_clashed_ids = set()
         for a, b in itertools.combinations(group, 2):
             if is_rule_c_clash(a, b):
                 rule_c_clashed_ids.add(a.request_id)
                 rule_c_clashed_ids.add(b.request_id)
 
-        # Exclude hard-clashed requests from bundling
         bundling_pool = [r for r in group if r.request_id not in rule_c_clashed_ids]
         clashed_requests = [r for r in group if r.request_id in rule_c_clashed_ids]
 
-        # Step 5: Strict capped bundles (size 1-3)
-        bundles = construct_strict_capped_bundles(bundling_pool, allow_bundling=(mode == "recommended"))
-        # Add single units for clashed requests so they enter Step 6 independently
+        bundles = construct_strict_capped_bundles(
+            bundling_pool, allow_bundling=(mode == "recommended")
+        )
         for cr in clashed_requests:
             bundles.append([cr])
 
-        # Step 6: Priority Walk
-        # score = (4 - priority)*100 + max(0, 7 - days_until_due)*10
-        def get_unit_score(u: List[MaintenanceRequest]) -> Tuple[float, int, datetime, str]:
+        def get_unit_score(u: List[MaintenanceRequest]) -> Tuple[float, int, float, str]:
             prio = min(r.priority for r in u)
-            # days until due
             days_until_due = 7
             for r in u:
                 if r.due_date:
@@ -595,11 +619,9 @@ def solve_maintenance_schedule(
                     days_until_due = min(days_until_due, delta)
             due_bonus = max(0, 7 - days_until_due) * 10
             score = (4 - prio) * 100 + due_bonus
-            # Earliest start, corridor name ascending for tie breaker
             earliest_dt = min(r.earliest_start for r in u)
             return (score, -prio, -earliest_dt.timestamp(), u[0].corridor)
 
-        # Sort descending by score
         bundles.sort(key=get_unit_score, reverse=True)
 
         for unit in bundles:
@@ -608,42 +630,44 @@ def solve_maintenance_schedule(
             bundle_id = f"BND-{uuid.uuid4().hex[:6].upper()}" if is_bundled else None
             corridor = unit[0].corridor
 
-            # True tie check: same priority AND same due date AND actual physical overlap
+            # FIX (v7): true tie now requires that the units CANNOT be bundled.
             is_true_tie = False
             for other_unit in bundles:
-                if other_unit != unit:
-                    same_prio = min(r.priority for r in unit) == min(r.priority for r in other_unit)
-                    same_due = min(r.due_date or r.earliest_start.date() for r in unit) == min(r.due_date or r.earliest_start.date() for r in other_unit)
-                    physical_ov = any(
-                        r1.corridor.strip().upper() == r2.corridor.strip().upper() and
-                        raw_intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end) and
-                        km_ranges_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end)
+                if other_unit == unit:
+                    continue
+                same_prio = min(r.priority for r in unit) == min(r.priority for r in other_unit)
+                same_due = (
+                    min(r.due_date or r.earliest_start.date() for r in unit)
+                    == min(r.due_date or r.earliest_start.date() for r in other_unit)
+                )
+                physical_ov = any(
+                    r1.corridor.strip().upper() == r2.corridor.strip().upper()
+                    and raw_intervals_overlap(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end)
+                    and km_ranges_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end)
+                    for r1 in unit for r2 in other_unit
+                )
+                if same_prio and same_due and physical_ov:
+                    can_merge = all(
+                        requests_pairwise_compatible(r1, r2)
+                        and not is_rule_c_clash(r1, r2)
+                        and not has_resource_conflict(r1, r2)
                         for r1 in unit for r2 in other_unit
                     )
-                    if same_prio and same_due and physical_ov:
+                    if not can_merge:
                         is_true_tie = True
                         break
 
-            # Rule C hard clash check
             has_rule_c = any(r.request_id in rule_c_clashed_ids for r in unit)
 
-            # Check (a): Emergency reservations from Step 1
-            overlapping_emergencies = set()
+            overlapping_emergencies: Set[str] = set()
             for r in unit:
-                for slot in reserved_slots:
-                    if slot.get("is_emergency") and slot["corridor"].strip().upper() == r.corridor.strip().upper():
-                        if raw_intervals_overlap(r.earliest_start, r.latest_end, slot["buffer_start"], slot["buffer_end"]):
-                            if km_ranges_overlap(r.km_start, r.km_end, slot["km_start"], slot["km_end"]):
-                                overlapping_emergencies.update(slot.get("emergency_ids", []))
+                overlapping_emergencies.update(overlaps_active_emergency(r))
 
-            # Duration and start/end calculation
             duration = max(r.duration_minutes for r in unit)
             common_start = max(r.earliest_start for r in unit)
             common_end = min(r.latest_end for r in unit)
 
             scheduled_start = None
-            train_conflict_names = []
-
             if not is_true_tie and not has_rule_c and not overlapping_emergencies:
                 scheduled_start = find_greedy_best_fit_gap(
                     bundle=unit,
@@ -652,11 +676,10 @@ def solve_maintenance_schedule(
                     earliest_start=common_start,
                     latest_end=common_end,
                     reserved_slots=reserved_slots,
-                    trains=trains
+                    trains=trains,
                 )
 
             if scheduled_start is not None:
-                # Successfully scheduled & Approved!
                 scheduled_end = scheduled_start + timedelta(minutes=duration)
                 min_km = min(r.km_start for r in unit)
                 max_km = max(r.km_end for r in unit)
@@ -682,11 +705,10 @@ def solve_maintenance_schedule(
                     bundling_explanation=generate_block_explanation(
                         corridor, unit, duration, saved_minutes, isolation_text, allocated_resources
                     ),
-                    requests=list(unit)
+                    requests=list(unit),
                 )
                 blocks.append(block)
 
-                # Add to reserved slots
                 reserved_slots.append({
                     "corridor": corridor,
                     "buffer_start": scheduled_start - TIME_BUFFER,
@@ -696,7 +718,7 @@ def solve_maintenance_schedule(
                     "km_start": min_km,
                     "km_end": max_km,
                     "is_emergency": False,
-                    "requests": list(unit)
+                    "requests": list(unit),
                 })
 
                 for r in unit:
@@ -715,15 +737,14 @@ def solve_maintenance_schedule(
                         bundle_members=[x for x in unit_ids if x != r.request_id],
                         retry_count=r.retry_count,
                         reason=reason,
-                        train_window_checked=needs_disconnection(r) or False
+                        train_window_checked=bool(needs_disconnection(r)),
                     )
             else:
-                # Deferral / Failure -> Step 7: Retry Cap
                 for r in unit:
                     new_retry = r.retry_count + 1
                     if is_true_tie:
                         final_st = "Manual Review"
-                        fail_reason = "Manual Review: Tied competitors have identical priority, due date, and physical conflict."
+                        fail_reason = "Manual Review: Tied competitors have identical priority, due date, and cannot be bundled (Rule C, resource, or work-type exception)."
                     elif has_rule_c:
                         final_st = "Manual Review"
                         fail_reason = "Manual Review: Same-asset hard clash (Rule C) on identical asset and work type."
@@ -743,7 +764,6 @@ def solve_maintenance_schedule(
                             final_st = "Deferred"
                             fail_reason = f"Deferred: Corridor slot occupied or train path conflict. Retried {new_retry}/3 times."
 
-                    # Bundle audit trail: preserve bundle_id on each member even when deferred!
                     decisions[r.request_id] = RequestDecision(
                         request_id=r.request_id,
                         application_id=r.application_id,
@@ -754,35 +774,48 @@ def solve_maintenance_schedule(
                         bundle_members=[x for x in unit_ids if x != r.request_id],
                         retry_count=new_retry,
                         reason=fail_reason,
-                        train_window_checked=needs_disconnection(r) or False
+                        train_window_checked=bool(needs_disconnection(r)),
                     )
 
-    # Sort blocks by scheduled time
+    # ----------------------------------------------------------------------
+    # Final assembly + counters (K.10)
+    # ----------------------------------------------------------------------
     blocks.sort(key=lambda b: b.scheduled_start)
-    
-    # Counters K.10
+
     total_requested = len(eligible)
     approved_count = sum(1 for d in decisions.values() if d.final_status == "Approved")
     isolated_emergency_count = sum(1 for d in decisions.values() if d.final_status == "Isolated-Emergency")
     deferred_count = sum(1 for d in decisions.values() if d.final_status == "Deferred")
     manual_review_count = sum(1 for d in decisions.values() if d.final_status == "Manual Review")
-    
-    total_completed = approved_count + isolated_emergency_count
-    total_downtime = sum(b.duration_minutes for b in blocks)
-    total_saved = sum(b.time_saved_minutes for b in blocks)
-    efficiency = round((total_saved / (total_downtime + total_saved) * 100), 1) if (total_downtime + total_saved) > 0 else 0.0
 
-    # Summary string per K.10
+    total_completed = approved_count + isolated_emergency_count
+    total_downtime = sum(b.duration_minutes for b in blocks if not b.block_id.startswith("EMG-"))
+    total_saved = sum(b.time_saved_minutes for b in blocks)
+    efficiency = (
+        round((total_saved / (total_downtime + total_saved) * 100), 1)
+        if (total_downtime + total_saved) > 0 else 0.0
+    )
+
     summary_text = (
         f"{total_completed} of {total_requested} requests handled: "
         f"{approved_count} approved, {isolated_emergency_count} isolated-emergency, "
         f"{deferred_count} deferred, {manual_review_count} manual review."
     )
 
-    unassigned_ids = [d.request_id for d in decisions.values() if d.final_status in ("Deferred", "Manual Review")]
-    infeasibility_reasons = [d.reason for d in decisions.values() if d.final_status in ("Deferred", "Manual Review")]
+    unassigned_ids = [
+        d.request_id for d in decisions.values()
+        if d.final_status in ("Deferred", "Manual Review")
+    ]
+    infeasibility_reasons = [
+        d.reason for d in decisions.values()
+        if d.final_status in ("Deferred", "Manual Review")
+    ]
 
-    plan_name = "Plan A: Maximum Bundling & Line Efficiency" if mode == "recommended" else "Plan B: Rapid Earliest Turnaround"
+    plan_name = (
+        "Plan A: Maximum Bundling & Line Efficiency"
+        if mode == "recommended"
+        else "Plan B: Rapid Earliest Turnaround"
+    )
 
     return SchedulePlan(
         schedule_id=f"SCHED-{uuid.uuid4().hex[:8].upper()}",
@@ -800,5 +833,5 @@ def solve_maintenance_schedule(
         decisions=list(decisions.values()),
         deferred_requests=[d for d in decisions.values() if d.final_status == "Deferred"],
         manual_review_requests=[d for d in decisions.values() if d.final_status == "Manual Review"],
-        isolated_emergency_requests=[d for d in decisions.values() if d.final_status == "Isolated-Emergency"]
+        isolated_emergency_requests=[d for d in decisions.values() if d.final_status == "Isolated-Emergency"],
     )

@@ -35,7 +35,7 @@ export async function fetchHealth() {
   return res.json();
 }
 
-// Ingestion (Part D)
+// Ingestion
 export async function ingestDocument(file: File, docType: string = 'request'): Promise<IngestResponse> {
   const formData = new FormData();
   formData.append('file', file);
@@ -50,7 +50,7 @@ export async function ingestDocument(file: File, docType: string = 'request'): P
   return res.json();
 }
 
-// Trains (Part E)
+// Trains
 export async function fetchTrains(corridor?: string): Promise<TrainMovement[]> {
   const url = corridor ? `${API_BASE}/trains?corridor=${encodeURIComponent(corridor)}` : `${API_BASE}/trains`;
   const res = await fetch(url);
@@ -59,13 +59,10 @@ export async function fetchTrains(corridor?: string): Promise<TrainMovement[]> {
 }
 
 export async function clearAllTrains(): Promise<{ message: string }> {
-  const res = await fetch(`${API_BASE}/trains`, {
-    method: 'DELETE',
-  });
+  const res = await fetch(`${API_BASE}/trains`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to clear trains');
   return res.json();
 }
-
 
 // Requests CRUD
 export async function fetchRequests(filters?: {
@@ -115,9 +112,7 @@ export async function updateRequest(id: string, payload: Partial<MaintenanceRequ
 }
 
 export async function confirmRequest(id: string): Promise<MaintenanceRequest> {
-  const res = await fetch(`${API_BASE}/requests/${id}/confirm`, {
-    method: 'POST',
-  });
+  const res = await fetch(`${API_BASE}/requests/${id}/confirm`, { method: 'POST' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to confirm request');
@@ -126,9 +121,7 @@ export async function confirmRequest(id: string): Promise<MaintenanceRequest> {
 }
 
 export async function deleteRequest(id: string): Promise<{ message: string }> {
-  const res = await fetch(`${API_BASE}/requests/${id}`, {
-    method: 'DELETE',
-  });
+  const res = await fetch(`${API_BASE}/requests/${id}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to delete request');
@@ -136,7 +129,6 @@ export async function deleteRequest(id: string): Promise<{ message: string }> {
   return res.json();
 }
 
-// Bulk Delete (Part H)
 export async function bulkDeleteRequests(requestIds: string[]): Promise<BulkDeleteResponse> {
   const res = await fetch(`${API_BASE}/requests/bulk-delete`, {
     method: 'POST',
@@ -151,9 +143,7 @@ export async function bulkDeleteRequests(requestIds: string[]): Promise<BulkDele
 }
 
 export async function clearAllRequests(): Promise<{ message: string }> {
-  const res = await fetch(`${API_BASE}/requests`, {
-    method: 'DELETE',
-  });
+  const res = await fetch(`${API_BASE}/requests`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to clear requests');
   return res.json();
 }
@@ -172,7 +162,7 @@ export async function checkConflicts(requestIds?: string[]): Promise<ConflictDet
   return res.json();
 }
 
-// Scheduling & Deterministic Optimization
+// Optimization
 export async function optimizeSchedule(requestIds?: string[]): Promise<SchedulePlan> {
   const res = await fetch(`${API_BASE}/schedules/optimize`, {
     method: 'POST',
@@ -182,18 +172,6 @@ export async function optimizeSchedule(requestIds?: string[]): Promise<ScheduleP
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Optimization failed');
-  }
-  return res.json();
-}
-
-// In-Memory Demo Runner (Part L)
-export async function runDemoSchedule(): Promise<SchedulePlan> {
-  const res = await fetch(`${API_BASE}/demo/run`, {
-    method: 'POST',
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || 'Failed to run in-memory demo');
   }
   return res.json();
 }
@@ -248,16 +226,27 @@ export async function fetchAudits(id: string): Promise<ApprovalAudit[]> {
   return res.json();
 }
 
-// Download Approval Report PDF (Part F)
+// FIX: preserve backend-generated filename (contains IST timestamp).
 export async function downloadApprovalReport(scheduleId: string) {
   const url = `${API_BASE}/schedules/${scheduleId}/approval-report`;
   const res = await fetch(url);
   if (!res.ok) throw new Error('Failed to download approval report');
+
+  // Try to use backend-provided filename from Content-Disposition header
+  let filename = `approval_report_${scheduleId}.pdf`;
+  const disposition = res.headers.get('Content-Disposition');
+  if (disposition) {
+    const match = /filename="?([^"]+)"?/.exec(disposition);
+    if (match && match[1]) {
+      filename = match[1];
+    }
+  }
+
   const blob = await res.blob();
   const downloadUrl = window.URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = downloadUrl;
-  a.download = `approval_report_${scheduleId}.pdf`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -282,7 +271,7 @@ export async function fetchApprovalHistory(filters?: {
   return res.json();
 }
 
-// Export Endpoints (Excel / PDF Blob download helpers)
+// Export
 export async function downloadExport(
   type: 'requests' | 'approvals',
   format: 'excel' | 'pdf'

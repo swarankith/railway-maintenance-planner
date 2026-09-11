@@ -6,6 +6,11 @@ Conflict Detection Engine for Railway Maintenance Requests (Part A.3).
 - Resource normalization: lowercase, '-', '_', space equivalent
 - Duplicate detection: rapidfuzz token_sort_ratio >= 90
 - Rule C: exact match on normalized work_type and normalized asset (lowercase, strip whitespace/punctuation)
+
+Fix (v7): Removed the department-whitelist gate from the compatibility check.
+Compatibility now aligns with batch_engine.requests_pairwise_compatible:
+Category B + anything -> compatible; Category A + Category A -> compatible
+unless the pair is one of the 4 explicit INCOMPATIBLE_CAT_A_PAIRS.
 """
 import re
 import string
@@ -14,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional, Set
 from rapidfuzz import fuzz
 
-from backend.config import is_department_pair_compatible, INCOMPATIBLE_CAT_A_PAIRS
+from backend.config import INCOMPATIBLE_CAT_A_PAIRS
 from backend.models import (
     MaintenanceRequest,
     TrainMovement,
@@ -38,7 +43,6 @@ def normalize_string_exact(val: str) -> str:
     """Lowercase, strip whitespace and punctuation for exact matching."""
     if not val:
         return ""
-    # Remove punctuation
     val = "".join(c for c in val if c not in string.punctuation)
     return " ".join(val.lower().split())
 
@@ -118,7 +122,7 @@ def parse_km_range_robust(text: str) -> Tuple[Optional[float], Optional[float]]:
 
 def is_duplicate_request(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool:
     """
-    Duplicate detection timing: rapidfuzz.token_sort_ratio >= 90 on:
+    Duplicate detection: rapidfuzz.token_sort_ratio >= 90 on:
     corridor + department + work_type + km_range + start_time
     """
     s1 = (
@@ -133,6 +137,18 @@ def is_duplicate_request(r1: MaintenanceRequest, r2: MaintenanceRequest) -> bool
     )
     ratio = fuzz.token_sort_ratio(s1, s2)
     return ratio >= 90
+
+
+def _is_incompatible_cat_a_pair(work1: str, work2: str) -> bool:
+    """Checks whether two work types form one of the 4 prohibited Category A pairs."""
+    n1 = normalize_string_exact(work1)
+    n2 = normalize_string_exact(work2)
+    for p0, p1 in INCOMPATIBLE_CAT_A_PAIRS:
+        np0 = normalize_string_exact(p0)
+        np1 = normalize_string_exact(p1)
+        if (n1 == np0 and n2 == np1) or (n1 == np1 and n2 == np0):
+            return True
+    return False
 
 
 def detect_all_conflicts(
@@ -164,7 +180,7 @@ def detect_all_conflicts(
                 t_ov_start, t_ov_end = get_overlap_interval(r1.earliest_start, r1.latest_end, r2.earliest_start, r2.latest_end)
                 km_ov_start, km_ov_end = get_km_overlap(r1.km_start, r1.km_end, r2.km_start, r2.km_end)
 
-                # Rule C: Same normalized work_type AND same normalized asset (exact match)
+                # Rule C: same normalized work_type AND same normalized asset (exact match)
                 norm_work1 = normalize_string_exact(r1.work_type)
                 norm_work2 = normalize_string_exact(r2.work_type)
                 norm_asset1 = normalize_string_exact(r1.asset)
@@ -192,24 +208,15 @@ def detect_all_conflicts(
                     continue
 
                 # Incompatible Category A pair check (Part A.2)
-                pair1 = (norm_work1, norm_work2)
-                pair2 = (norm_work2, norm_work1)
-                is_incompatible_cat_a = False
-                for p in INCOMPATIBLE_CAT_A_PAIRS:
-                    pn0 = normalize_string_exact(p[0])
-                    pn1 = normalize_string_exact(p[1])
-                    if (norm_work1 == pn0 and norm_work2 == pn1) or (norm_work1 == pn1 and norm_work2 == pn0):
-                        is_incompatible_cat_a = True
-                        break
-
-                compatible = is_department_pair_compatible(r1.department, r2.department) and not is_incompatible_cat_a
+                # FIX (v7): department whitelist removed. Only the 4 exception pairs matter.
+                is_incompatible_cat_a = _is_incompatible_cat_a_pair(r1.work_type, r2.work_type)
                 both_shareable = r1.block_shared_allowed and r2.block_shared_allowed
 
-                if not both_shareable or not compatible:
+                if not both_shareable or is_incompatible_cat_a:
                     conflicts.append(ConflictDetail(
                         conflict_id=f"CONF-{uuid.uuid4().hex[:6].upper()}",
                         cycle_id=cycle_id,
-                        conflict_type=ConflictTypeEnum.COMPATIBILITY if not compatible else ConflictTypeEnum.SPATIAL_TIME_KM,
+                        conflict_type=ConflictTypeEnum.COMPATIBILITY if is_incompatible_cat_a else ConflictTypeEnum.SPATIAL_TIME_KM,
                         severity="Hard",
                         request_ids=[r1.request_id, r2.request_id],
                         corridor=r1.corridor,
@@ -239,7 +246,7 @@ def detect_all_conflicts(
                         explanation=(
                             f"Spatial & temporal overlap on corridor {r1.corridor} between KM {km_ov_start:.1f}-{km_ov_end:.1f} "
                             f"({r1.department}: {r1.work_type} and {r2.department}: {r2.work_type}). "
-                            f"Both departments are compatible for bundling into a unified maintenance block."
+                            f"Both requests are compatible for bundling into a unified maintenance block."
                         ),
                         suggested_resolution="Bundle both jobs into a single combined corridor block to minimize line closure downtime."
                     ))
@@ -270,7 +277,7 @@ def detect_all_conflicts(
                         suggested_resolution=f"Shift {r2.request_id} to start after {r1.request_id} finishes using '{res_display}'."
                     ))
 
-        # Train Movement Conflicts (Hard Safety Constraint with 15min buffer and min 0.1km overlap)
+        # Train Movement Conflicts
         for train in train_movements:
             same_corr = r1.corridor.strip().upper() == train.corridor.strip().upper()
             t_overlap = buffered_intervals_overlap(r1.earliest_start, r1.latest_end, train.departure_time, train.arrival_time)

@@ -1,7 +1,7 @@
 """
 Canonical Data Models, Pydantic Schemas, and SQLAlchemy Database Entities.
 All timestamps are timezone-aware (IST, Asia/Kolkata, UTC+5:30).
-Phase 2 Final (v6):
+Phase 2 Final (v7):
 - Authentication removed
 - Application ID (APP-YYYYMMDD-XXXXXX)
 - Priority Schema (1=Emergency, 2=High Urgent, 3=Normal)
@@ -9,6 +9,7 @@ Phase 2 Final (v6):
 - cycle_id on DBMaintenanceRequest and DBTrainMovement
 - ProcessingCycle with status (Active | Approved | Rejected | Archived)
 - DBApprovalAudit with cycle_id and report_url
+- ConflictTypeEnum cleaned: duplicate RESOURCE_OVERLAP / TRAIN_MOVEMENT_CONFLICT removed
 """
 import uuid
 import json
@@ -58,8 +59,6 @@ class ConflictTypeEnum(str, Enum):
     COMPATIBILITY = "Compatibility"
     SAME_ASSET_CLASH = "SameAssetClash"
     COMPETING_EMERGENCY = "CompetingEmergency"
-    RESOURCE_OVERLAP = "Resource"
-    TRAIN_MOVEMENT_CONFLICT = "TrainMovement"
 
 
 class PlanStatusEnum(str, Enum):
@@ -122,7 +121,6 @@ class MaintenanceRequestBase(BaseModel):
             dt = v
         else:
             raise ValueError(f"Invalid datetime format: {v}")
-
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=APP_TIMEZONE)
         else:
@@ -226,7 +224,7 @@ class ConflictDetail(BaseModel):
     conflict_id: str = Field(default_factory=lambda: f"CONF-{uuid.uuid4().hex[:6].upper()}")
     cycle_id: Optional[str] = None
     conflict_type: ConflictTypeEnum
-    severity: str = "Hard"  # Hard, Warning, ReviewRequired
+    severity: str = "Hard"
     request_ids: List[str]
     corridor: Optional[str] = None
     time_overlap_start: Optional[datetime] = None
@@ -251,7 +249,7 @@ class MaintenanceBlock(BaseModel):
     departments: List[str]
     resources_allocated: List[str] = Field(default_factory=list)
     isolation_applied: Optional[str] = "None"
-    utilization_score: float = 100.0  # %
+    utilization_score: float = 100.0
     time_saved_minutes: int = 0
     bundling_explanation: str
     requests: List[MaintenanceRequest] = Field(default_factory=list)
@@ -336,14 +334,6 @@ class BulkDeleteResponse(BaseModel):
     ids: List[str]
     skipped: List[str]
     reason: Optional[str] = None
-    deleted_count: Optional[int] = None
-    skipped_count: Optional[int] = None
-
-    def model_post_init(self, __context: Any) -> None:
-        if self.deleted_count is None:
-            self.deleted_count = self.deleted
-        if self.skipped_count is None:
-            self.skipped_count = len(self.skipped)
 
 
 # ==========================================
@@ -352,7 +342,7 @@ class BulkDeleteResponse(BaseModel):
 
 class DBMaintenanceRequest(Base):
     __tablename__ = "maintenance_requests"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     request_id = Column(String(64), unique=True, index=True, nullable=False)
     application_id = Column(String(64), index=True, nullable=True)
@@ -441,7 +431,7 @@ class DBProcessingCycle(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     cycle_id = Column(String(64), unique=True, index=True, nullable=False)
-    status = Column(String(32), nullable=False, default="Active")  # Active, Approved, Rejected, Archived
+    status = Column(String(32), nullable=False, default="Active")
     total_requests = Column(Integer, nullable=False, default=0)
     approved_count = Column(Integer, nullable=False, default=0)
     deferred_count = Column(Integer, nullable=False, default=0)

@@ -9,13 +9,8 @@ import {
   Trash2,
   ArrowRight,
   Train,
-  Clock,
-  MapPin,
   RefreshCw,
-  Tag,
   Play,
-  Database,
-  Layers,
 } from 'lucide-react';
 import { MaintenanceRequest, IngestResponse, TrainMovement, ActiveTab } from '../types';
 import { ingestDocument, confirmRequest, deleteRequest, clearAllTrains } from '../services/api';
@@ -48,9 +43,11 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [uploadType, setUploadType] = useState<UploadType>('request');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // FIX: eligibility matches the backend's get_eligible_requests:
+  // only Confirmed, Deferred, Manual Review with cycle_id IS NULL.
   const eligibleRequests = requests.filter(
     (r) =>
-      ['Confirmed', 'Needs-Review', 'Deferred', 'Manual Review'].includes(r.status) &&
+      ['Confirmed', 'Deferred', 'Manual Review'].includes(r.status) &&
       !r.cycle_id
   );
   const eligibleTrains = trains.filter((t) => !t.cycle_id);
@@ -121,7 +118,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Action Header with Demo & Optimize */}
       <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-black text-navy-950 flex items-center gap-2">
@@ -134,11 +130,17 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Optimize Button with Gating */}
           <button
             onClick={onTriggerOptimization}
             disabled={isOptimizing || !hasRequests || !hasTrains}
             className="px-5 py-2.5 rounded-xl bg-saffron-500 hover:bg-saffron-600 text-navy-950 text-xs font-black shadow-md flex items-center gap-2 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            title={
+              !hasRequests
+                ? 'Upload maintenance requests first'
+                : !hasTrains
+                ? 'Upload train movements first'
+                : 'Run deterministic optimization engine'
+            }
           >
             <Play className="w-4 h-4 fill-navy-950" />
             <span>{isOptimizing ? 'Optimizing...' : 'Run Deterministic Engine'}</span>
@@ -146,7 +148,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
       </div>
 
-      {/* Gating Status Banners */}
       {(!hasRequests || !hasTrains) && (
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl space-y-2 text-xs text-amber-900">
           <div className="flex items-center gap-2 font-bold">
@@ -168,7 +169,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
       )}
 
-      {/* Upload Type Tabs */}
       <div className="flex gap-2 mb-2 flex-wrap items-center">
         <button
           onClick={() => setUploadType('request')}
@@ -201,7 +201,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </button>
       </div>
 
-      {/* Upload Drag & Drop Area */}
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -264,7 +263,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
       )}
 
-      {/* Ingest Summary Banner */}
       {ingestResult && (
         <div className="p-5 bg-white border border-saffron-300 rounded-2xl shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
@@ -310,7 +308,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
       )}
 
-      {/* Train Movements Table (when Train Movements tab is active) */}
+      {/* Train Movements Table */}
       {uploadType === 'train_movement' && (
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
           <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
@@ -420,7 +418,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
       )}
 
-      {/* Needs Review & Ingested Review Queue */}
+      {/* Review Queue */}
       {reviewQueue.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
           <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
@@ -465,23 +463,17 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                       <div className="font-mono text-[10px] font-bold text-navy-800">{req.application_id || 'APP-LEGACY'}</div>
                       <div className="font-mono font-bold text-slate-900">{req.request_id}</div>
                     </td>
-
-                    <td className="px-4 py-3 font-semibold text-slate-900">
-                      {req.department}
-                    </td>
-
+                    <td className="px-4 py-3 font-semibold text-slate-900">{req.department}</td>
                     <td className="px-4 py-3">
                       <div className="font-bold text-navy-900">{req.corridor}</div>
                       <div className="text-[11px] text-slate-500 font-mono">
                         KM {req.km_start.toFixed(1)} – {req.km_end.toFixed(1)}
                       </div>
                     </td>
-
                     <td className="px-4 py-3">
                       <div className="font-semibold text-slate-900">{req.work_type}</div>
                       <div className="text-[11px] text-slate-500">{req.asset}</div>
                     </td>
-
                     <td className="px-4 py-3">
                       <div className="font-semibold text-slate-900 font-mono">
                         {req.duration_minutes} min ({Math.round((req.duration_minutes / 60) * 10) / 10}h)
@@ -491,7 +483,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                         {new Date(req.latest_end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })} IST
                       </div>
                     </td>
-
                     <td className="px-4 py-3">
                       <span
                         className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -505,7 +496,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                         P{req.priority}
                       </span>
                     </td>
-
                     <td className="px-4 py-3">
                       {req.status === 'Needs-Review' ? (
                         <div className="space-y-1">
@@ -524,7 +514,6 @@ export const UploadModal: React.FC<UploadModalProps> = ({
                         </span>
                       )}
                     </td>
-
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
@@ -558,13 +547,13 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         </div>
       )}
 
-      {/* Empty State Prompt */}
-      {requests.length === 0 && !uploading && (
+      {/* Empty State */}
+      {requests.length === 0 && trains.length === 0 && !uploading && (
         <div className="text-center py-12 px-4 bg-white border border-slate-200 rounded-2xl shadow-sm">
           <FileText className="w-12 h-12 text-slate-400 mx-auto mb-3" />
           <h4 className="text-sm font-bold text-slate-800">No records in database</h4>
           <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-            Starts with an empty database. Upload documents above or add requests manually to run the deterministic engine.
+            Starts with an empty database. Upload maintenance requests and train movements above to run the deterministic engine.
           </p>
         </div>
       )}

@@ -5,8 +5,10 @@ assigns Application ID, and flags incomplete records.
 
 Supports document types: maintenance request, train movement.
 
-Postgres-safe: every string field is truncated to its column width before insert
-to prevent psycopg2 StringDataRightTruncation errors.
+Phase 2 Final (v10):
+- Postgres-safe string truncation for every string field.
+- On re-upload, existing records are UPDATED with cycle_id reset to NULL
+  so they re-enter the active pool and become eligible for the next optimizer run.
 """
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -49,6 +51,11 @@ async def ingest_document(
     Upload a document (PDF or DOCX).
     - doc_type == "request" (default): extract and store maintenance requests.
     - doc_type == "train_movement": extract and store train movements.
+
+    Re-upload behavior:
+      If a record already exists (matched by request_id / train_id+corridor+departure),
+      it is UPDATED and its cycle_id is reset to NULL, so it re-enters the
+      active pool and becomes eligible for the next optimizer run.
     """
     try:
         content_bytes = await file.read()
@@ -81,6 +88,9 @@ async def ingest_document(
                 app_id = _safe(req.application_id or ingest_res.application_id, 128)
 
                 if existing:
+                    # ----- RESET cycle_id so the record becomes eligible again -----
+                    existing.cycle_id = None
+                    # ----- Refresh all other fields with the latest extraction -----
                     existing.application_id = app_id
                     existing.department = _safe(str(req.department), 64)
                     existing.corridor = _safe(req.corridor, 255)
@@ -141,7 +151,20 @@ async def ingest_document(
                     DBTrainMovement.corridor == train.corridor,
                     DBTrainMovement.departure_time == train.departure_time,
                 ).first()
-                if not existing_train:
+
+                if existing_train:
+                    # ----- RESET cycle_id so the train becomes eligible again -----
+                    existing_train.cycle_id = None
+                    # ----- Refresh all other fields with the latest extraction -----
+                    existing_train.train_number = _safe(getattr(train, "train_number", None), 64)
+                    existing_train.train_name = _safe(getattr(train, "train_name", None), 255)
+                    existing_train.speed_kmh = getattr(train, "speed_kmh", None)
+                    existing_train.arrival_time = train.arrival_time
+                    existing_train.km_start = train.km_start
+                    existing_train.km_end = train.km_end
+                    existing_train.train_type = _safe(train.train_type, 64)
+                    existing_train.source_document = _safe(train.source_document, 255)
+                else:
                     db_train = DBTrainMovement(
                         train_id=_safe(train.train_id, 128),
                         train_number=_safe(getattr(train, "train_number", None), 64),
@@ -163,3 +186,4 @@ async def ingest_document(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to parse document: {str(e)}")
+    

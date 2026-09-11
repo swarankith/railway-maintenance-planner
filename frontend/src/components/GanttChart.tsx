@@ -19,6 +19,46 @@ interface GanttChartProps {
   setActiveTab: (tab: ActiveTab) => void;
 }
 
+// ---------------------------------------------------------------------------
+// Lane-stacking helper.
+// Given all blocks on a corridor, assign each block to the first lane where
+// it does not overlap an already-placed block on that lane. Returns the lanes
+// and a map from block_id to lane index. This prevents overlapping blocks
+// from rendering on top of each other.
+// ---------------------------------------------------------------------------
+function assignLanes(blocks: MaintenanceBlock[]) {
+  const sorted = [...blocks].sort(
+    (a, b) => new Date(a.scheduled_start).getTime() - new Date(b.scheduled_start).getTime()
+  );
+  const lanes: MaintenanceBlock[][] = [];
+  const laneFor: Record<string, number> = {};
+
+  for (const block of sorted) {
+    const bStart = new Date(block.scheduled_start).getTime();
+    const bEnd = new Date(block.scheduled_end).getTime();
+    let placed = false;
+
+    for (let i = 0; i < lanes.length; i++) {
+      const last = lanes[i][lanes[i].length - 1];
+      const lEnd = new Date(last.scheduled_end).getTime();
+      // Small 1-minute gap so touching endpoints don't get merged
+      if (bStart >= lEnd - 60000) {
+        lanes[i].push(block);
+        laneFor[block.block_id] = i;
+        placed = true;
+        break;
+      }
+    }
+
+    if (!placed) {
+      lanes.push([block]);
+      laneFor[block.block_id] = lanes.length - 1;
+    }
+  }
+
+  return { lanes, laneFor };
+}
+
 export const GanttChart: React.FC<GanttChartProps> = ({
   schedulePlan,
   trains = [],
@@ -108,7 +148,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
   const totalWidthPx = totalHours * pixelsPerHour;
 
   const hourTicks = useMemo(() => {
-    const ticks = [];
+    const ticks: Date[] = [];
     for (let i = 0; i <= totalHours; i++) {
       ticks.push(new Date(minTime.getTime() + i * 3600000));
     }
@@ -132,9 +172,6 @@ export const GanttChart: React.FC<GanttChartProps> = ({
   const manualReviewRequests: RequestDecision[] = currentPlan?.manual_review_requests || [];
   const isolatedEmergencyRequests: RequestDecision[] = currentPlan?.isolated_emergency_requests || [];
 
-  // FIX: only show the empty state if there is truly nothing to display —
-  // not just because there are no approved blocks. Deferred / manual / emergency
-  // decisions must still render their panels.
   const hasAnyData =
     !!currentPlan &&
     (currentPlan.blocks.length > 0 ||
@@ -160,6 +197,14 @@ export const GanttChart: React.FC<GanttChartProps> = ({
       </div>
     );
   }
+
+  // Lane layout constants
+  const BLOCK_LANE_HEIGHT = 28;
+  const BLOCK_GAP = 4;
+  const TRAIN_LANE_HEIGHT = 16;
+  const ROW_TOP_PADDING = 4;
+  const ROW_BOTTOM_PADDING = 4;
+  const GAP_BLOCK_TO_TRAIN = 4;
 
   return (
     <div ref={containerRef} className={`space-y-6 ${isFullscreen ? 'bg-slate-100 p-6 overflow-y-auto' : ''}`}>
@@ -313,6 +358,10 @@ export const GanttChart: React.FC<GanttChartProps> = ({
             <span>S&T</span>
           </div>
           <div className="flex items-center gap-1.5">
+            <div className="w-3 h-3 rounded bg-gradient-to-r from-navy-800 via-saffron-600 to-emerald-700 border border-saffron-400"></div>
+            <span className="text-navy-950 font-bold">Bundled (×N)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
             <div className="w-3 h-3 rounded bg-rose-700 border border-rose-900"></div>
             <span className="text-rose-800 font-bold">Isolated Emergency</span>
           </div>
@@ -333,6 +382,7 @@ export const GanttChart: React.FC<GanttChartProps> = ({
       <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto relative">
           <div style={{ width: `${totalWidthPx + 160}px` }}>
+            {/* Hour header */}
             <div className="flex border-b border-slate-200 bg-navy-800 text-[11px] font-mono text-white h-12 sticky top-0 z-30">
               <div className="w-[160px] shrink-0 px-3 py-2 font-sans font-bold border-r border-navy-700 flex items-center justify-between text-white sticky left-0 bg-navy-800 z-40 shadow-sm">
                 <span>Corridor</span>
@@ -359,74 +409,114 @@ export const GanttChart: React.FC<GanttChartProps> = ({
               </div>
             </div>
 
+            {/* Corridor rows */}
             <div className="divide-y divide-slate-200">
               {filteredCorridors.map((corridor) => {
                 const corridorBlocks = (currentPlan?.blocks || []).filter((b) => b.corridor === corridor);
                 const corridorTrains = trains.filter((t) => t.corridor === corridor);
 
+                // Lane-stack the blocks so overlapping ones don't cover each other
+                const { lanes, laneFor } = assignLanes(corridorBlocks);
+                const maxLanes = Math.max(1, lanes.length);
+
+                const blockAreaHeight = maxLanes * BLOCK_LANE_HEIGHT;
+                const trainLaneTop = ROW_TOP_PADDING + blockAreaHeight + GAP_BLOCK_TO_TRAIN;
+                const rowHeight =
+                  ROW_TOP_PADDING +
+                  blockAreaHeight +
+                  GAP_BLOCK_TO_TRAIN +
+                  TRAIN_LANE_HEIGHT +
+                  ROW_BOTTOM_PADDING;
+
                 return (
-                  <div key={corridor} className="flex h-[56px] hover:bg-slate-50/60 transition group">
+                  <div
+                    key={corridor}
+                    className="flex hover:bg-slate-50/60 transition group"
+                    style={{ height: `${rowHeight}px` }}
+                  >
+                    {/* Sticky left label */}
                     <div className="w-[160px] shrink-0 px-3 py-1.5 border-r border-slate-200 bg-slate-50 flex flex-col justify-center sticky left-0 z-20 shadow-sm">
-                      <div className="font-extrabold text-navy-950 text-xs truncate" title={corridor}>{corridor}</div>
+                      <div className="font-extrabold text-navy-950 text-xs truncate" title={corridor}>
+                        {corridor}
+                      </div>
                       <div className="text-[9px] text-slate-500 font-mono mt-0.5 flex items-center justify-between">
                         <span>{corridorBlocks.length} Blocks</span>
+                        <span>{maxLanes} {maxLanes > 1 ? 'Lanes' : 'Lane'}</span>
                         <span>{corridorTrains.length} Trains</span>
                       </div>
                     </div>
 
-                    <div className="flex-1 relative h-[56px] overflow-hidden bg-white">
-                      {hourTicks.map((tick, idx) => {
-                        const leftPx = idx * pixelsPerHour;
+                    {/* Timeline canvas */}
+                    <div
+                      className="flex-1 relative overflow-hidden bg-white"
+                      style={{ height: `${rowHeight}px` }}
+                    >
+                      {/* Vertical grid lines */}
+                      {hourTicks.map((_, idx) => (
+                        <div
+                          key={idx}
+                          style={{ left: `${idx * pixelsPerHour}px` }}
+                          className="absolute top-0 bottom-0 border-l border-slate-100 pointer-events-none"
+                        />
+                      ))}
+
+                      {/* Block lanes */}
+                      {corridorBlocks.map((block) => {
+                        const left = getPixelOffset(block.scheduled_start);
+                        const width = getPixelWidth(block.scheduled_start, block.scheduled_end);
+                        const isMultiDept = block.departments.length > 1;
+                        const isEmergency =
+                          block.block_id.startsWith('EMG-BLK') ||
+                          (block.isolation_applied || '').toLowerCase().includes('emergency');
+                        const laneIdx = laneFor[block.block_id] ?? 0;
+                        const top = ROW_TOP_PADDING + laneIdx * BLOCK_LANE_HEIGHT;
+
                         return (
                           <div
-                            key={idx}
-                            style={{ left: `${leftPx}px` }}
-                            className="absolute top-0 bottom-0 border-l border-slate-100 pointer-events-none"
-                          />
+                            key={block.block_id}
+                            onClick={() => onSelectBlock(block)}
+                            style={{
+                              left: `${left}px`,
+                              width: `${width}px`,
+                              top: `${top}px`,
+                              height: `${BLOCK_LANE_HEIGHT - BLOCK_GAP}px`,
+                            }}
+                            title={`${block.block_id} (${block.departments.join(', ')}) | ${block.requests.length} Jobs | KM ${block.km_start}-${block.km_end} | ${block.scheduled_start.slice(11, 16)}-${block.scheduled_end.slice(11, 16)}`}
+                            className={`absolute rounded-lg px-2 py-0.5 cursor-pointer shadow-sm border flex items-center justify-between overflow-hidden text-white transition-transform hover:scale-[1.02] hover:z-30 text-[10px] ${
+                              isEmergency
+                                ? 'bg-rose-700 border-rose-900 text-white font-bold ring-1 ring-rose-400'
+                                : isMultiDept
+                                ? 'bg-gradient-to-r from-navy-800 via-saffron-600 to-emerald-700 border-2 border-saffron-400'
+                                : block.departments.includes('Electrical')
+                                ? 'bg-amber-700 border-amber-800 text-white'
+                                : block.departments.includes('S&T')
+                                ? 'bg-purple-800 border-purple-900 text-white'
+                                : 'bg-blue-800 border-blue-900 text-white'
+                            }`}
+                          >
+                            <span className="font-mono font-bold truncate mr-1">
+                              {isEmergency && '⚠ '}
+                              {block.block_id}
+                            </span>
+                            <span
+                              className={`text-[8px] px-1 py-0.2 rounded shrink-0 font-bold ${
+                                block.requests.length > 1
+                                  ? 'bg-yellow-300 text-black'
+                                  : 'bg-black/30 text-white'
+                              }`}
+                            >
+                              {block.requests.length > 1 ? `×${block.requests.length}` : `${block.requests.length}J`}
+                            </span>
+                          </div>
                         );
                       })}
 
-                      <div className="absolute top-1 left-0 right-0 h-[28px]">
-                        {corridorBlocks.map((block) => {
-                          const left = getPixelOffset(block.scheduled_start);
-                          const width = getPixelWidth(block.scheduled_start, block.scheduled_end);
-                          const isMultiDept = block.departments.length > 1;
-                          const isEmergency =
-                            block.block_id.startsWith('EMG-BLK') ||
-                            (block.isolation_applied || '').toLowerCase().includes('emergency');
-
-                          return (
-                            <div
-                              key={block.block_id}
-                              onClick={() => onSelectBlock(block)}
-                              style={{ left: `${left}px`, width: `${width}px` }}
-                              title={`${block.block_id} (${block.departments.join(', ')}) | ${block.requests.length} Jobs | KM ${block.km_start}-${block.km_end}`}
-                              className={`absolute top-0 bottom-0 rounded-lg px-2 py-0.5 cursor-pointer shadow-sm border flex items-center justify-between overflow-hidden text-white transition-transform hover:scale-[1.02] hover:z-30 text-[10px] ${
-                                isEmergency
-                                  ? 'bg-rose-700 border-rose-900 text-white font-bold ring-1 ring-rose-400'
-                                  : isMultiDept
-                                  ? 'bg-gradient-to-r from-navy-800 via-saffron-600 to-emerald-700 border-saffron-400'
-                                  : block.departments.includes('Electrical')
-                                  ? 'bg-amber-700 border-amber-800 text-white'
-                                  : block.departments.includes('S&T')
-                                  ? 'bg-purple-800 border-purple-900 text-white'
-                                  : 'bg-blue-800 border-blue-900 text-white'
-                              }`}
-                            >
-                              <span className="font-mono font-bold truncate mr-1">
-                                {isEmergency && '⚠ '}{block.block_id}
-                              </span>
-                              <span className="text-[8px] bg-black/30 px-1 py-0.2 rounded shrink-0">
-                                {block.requests.length}J
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-
+                      {/* Train lane */}
                       <div
-                        className="absolute top-[34px] left-0 right-0 h-[16px] border-t border-slate-200"
+                        className="absolute left-0 right-0 border-t border-slate-200"
                         style={{
+                          top: `${trainLaneTop}px`,
+                          height: `${TRAIN_LANE_HEIGHT}px`,
                           backgroundImage:
                             'repeating-linear-gradient(45deg, #f8fafc, #f8fafc 6px, #f1f5f9 6px, #f1f5f9 12px)',
                         }}
